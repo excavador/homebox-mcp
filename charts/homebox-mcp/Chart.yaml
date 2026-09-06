@@ -4,9 +4,9 @@ description: Model Context Protocol server for a HomeBox inventory
 type: application
 version: 0.5.2
 appVersion: "0.5.2"
-home: https://github.com/opwerm/homebox-mcp
+home: https://github.com/excavador/homebox-mcp
 sources:
-  - https://github.com/opwerm/homebox-mcp
+  - https://github.com/excavador/homebox-mcp
 maintainers:
   - name: Oleg Tsarev
     email: oleg@tsarev.id

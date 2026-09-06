@@ -11,7 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/opwerm/homebox-mcp/internal/homebox"
+	"github.com/excavador/homebox-mcp/internal/homebox"
 )
 
 // MCP requires structuredContent to be an object. Several HomeBox endpoints

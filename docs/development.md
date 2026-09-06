@@ -88,8 +88,8 @@ The `Release` workflow (`truvity/ci-workflows`) then builds and publishes
 both artifacts:
 
 - the **image** via ko — no Dockerfile, multi-arch `amd64` + `arm64`, which
-  is not optional on arm boards — to `ghcr.io/opwerm/homebox-mcp`
-- the **chart** via helmctl to `oci://ghcr.io/opwerm/charts/homebox-mcp`
+  is not optional on arm boards — to `ghcr.io/excavador/homebox-mcp`
+- the **chart** via helmctl to `oci://ghcr.io/excavador/charts/homebox-mcp`
 
 Bump `charts/homebox-mcp/Chart.yaml` (`version` and `appVersion`) in the same
 commit as the code, so the chart's default image tag matches what was built.

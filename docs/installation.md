@@ -27,7 +27,7 @@ to mint the first key — the API cannot bootstrap itself.
 ## 1. As a local binary
 
 Download a release for your platform from
-[Releases](https://github.com/opwerm/homebox-mcp/releases), or build it:
+[Releases](https://github.com/excavador/homebox-mcp/releases), or build it:
 
     go build ./cmd/homebox-mcp
 
@@ -48,7 +48,7 @@ Then point a client at it — see [clients](clients.md).
     docker run --rm -i \
       -e HOMEBOX_URL=https://homebox.example.com \
       -e HOMEBOX_TOKEN=hb_... \
-      ghcr.io/opwerm/homebox-mcp:0.3.0
+      ghcr.io/excavador/homebox-mcp:0.3.0
 
 The image is multi-arch (`linux/amd64`, `linux/arm64`) and built with ko from
 a distroless static base: no shell, no package manager, runs as non-root.
@@ -58,7 +58,7 @@ To serve HTTP instead, set `TRANSPORT=http` and publish the port. **Read
 
 ## 3. On Kubernetes, with the Helm chart
 
-    helm install homebox-mcp oci://ghcr.io/opwerm/charts/homebox-mcp \
+    helm install homebox-mcp oci://ghcr.io/excavador/charts/homebox-mcp \
       --version 0.3.0 \
       --set homebox.url=http://homebox \
       --set homebox.existingSecret=homebox-mcp
@@ -97,7 +97,7 @@ spec:
 | `homebox.url` | — | **Required.** Base URL **without** `/api`; the server appends `/api/v1`. The chart refuses a URL ending in `/api`. |
 | `homebox.existingSecret` | — | **Required.** Secret holding the API key. |
 | `homebox.existingSecretTokenKey` | `token` | Key within that Secret. |
-| `image.registry` / `image.repository` | `ghcr.io` / `opwerm/homebox-mcp` | |
+| `image.registry` / `image.repository` | `ghcr.io` / `excavador/homebox-mcp` | |
 | `image.tag` | `""` | Empty means the chart's `appVersion`. Pin it to upgrade deliberately rather than whenever the chart is republished. |
 | `replicaCount` | `1` | The server is stateless, so more than one is safe. |
 | `service.port` | `8080` | Also the container's listen port. |

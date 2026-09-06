@@ -29,8 +29,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/urfave/cli/v3"
 
-	"github.com/opwerm/homebox-mcp/internal/homebox"
-	"github.com/opwerm/homebox-mcp/internal/server"
+	"github.com/excavador/homebox-mcp/internal/homebox"
+	"github.com/excavador/homebox-mcp/internal/server"
 )
 
 // version is overridden at build time.

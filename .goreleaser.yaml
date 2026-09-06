@@ -1,5 +1,5 @@
 # Image via ko (no Dockerfile), chart pushed separately by helmctl in the
-# release workflow. Both land in GHCR under opwerm.
+# release workflow. Both land in GHCR under excavador.
 version: 2
 project_name: homebox-mcp
 
@@ -32,7 +32,7 @@ kos:
     labels:
       org.opencontainers.image.title: homebox-mcp
       org.opencontainers.image.version: "{{ .Version }}"
-      org.opencontainers.image.source: https://github.com/opwerm/homebox-mcp
+      org.opencontainers.image.source: https://github.com/excavador/homebox-mcp
       org.opencontainers.image.licenses: MIT
 
 archives:
@@ -54,5 +54,5 @@ changelog:
 release:
   prerelease: auto
   footer: |
-    Image: `ghcr.io/opwerm/homebox-mcp:{{ .Version }}`
-    Chart: `oci://ghcr.io/opwerm/charts/homebox-mcp:{{ .Version }}`
+    Image: `ghcr.io/excavador/homebox-mcp:{{ .Version }}`
+    Chart: `oci://ghcr.io/excavador/charts/homebox-mcp:{{ .Version }}`

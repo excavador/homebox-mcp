@@ -28,7 +28,7 @@ import (
 	"strconv"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/opwerm/homebox-mcp/internal/homebox"
+	"github.com/excavador/homebox-mcp/internal/homebox"
 )
 
 func ptr[T any](v T) *T { return &v }

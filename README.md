@@ -5,8 +5,8 @@
 the attic, add what you just bought, or record that the boiler was serviced.
 
 ```
-ghcr.io/opwerm/homebox-mcp              image, multi-arch amd64 + arm64
-oci://ghcr.io/opwerm/charts/homebox-mcp chart
+ghcr.io/excavador/homebox-mcp              image, multi-arch amd64 + arm64
+oci://ghcr.io/excavador/charts/homebox-mcp chart
 ```
 
 ## Quick start

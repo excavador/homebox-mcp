@@ -1,6 +1,6 @@
 image:
   registry: ghcr.io
-  repository: opwerm/homebox-mcp
+  repository: excavador/homebox-mcp
   # Empty means the chart's appVersion. Pin it in a values file to upgrade
   # deliberately rather than whenever the chart is republished.
   tag: ""

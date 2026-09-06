@@ -1,4 +1,4 @@
-module github.com/opwerm/homebox-mcp
+module github.com/excavador/homebox-mcp
 
 go 1.27.0
 

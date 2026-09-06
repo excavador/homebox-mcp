@@ -18,7 +18,7 @@ jobs:
     with:
       charts: '["homebox-mcp"]'
       chart-app-version: release
-      chart-registry: oci://ghcr.io/opwerm/charts
+      chart-registry: oci://ghcr.io/excavador/charts
       # ko builds the image straight from Go — no Dockerfile, and multi-arch
       # including arm64, which is not optional on RK1 boards.
-      ko-docker-repo: ghcr.io/opwerm
+      ko-docker-repo: ghcr.io/excavador
