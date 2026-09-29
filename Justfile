@@ -47,7 +47,18 @@ chart:
         --set-string 'deploymentAnnotations.reloader\.stakater\.com/auto=true' \
       | awk '/^kind: Deployment/,/^spec:/' | grep -q 'reloader.stakater.com/auto' \
       || (echo "FAIL: deploymentAnnotations did not reach the Deployment"; exit 1)
-    @echo "chart ok: renders, refuses missing values (including auth), a /api url and unknown keys, and annotates the Deployment"
+    @# auth.scope defaults to openid and reaches SCOPE, so an estate that
+    @# never sets it still advertises a scope access-roster accepts.
+    @helm template t charts/homebox-mcp --set homebox.url=http://homebox \
+        --set homebox.existingSecret=x {{auth_values}} \
+      | grep -A1 'name: SCOPE' | grep -q '"openid"' \
+      || (echo "FAIL: auth.scope did not default to openid on SCOPE"; exit 1)
+    @# and an estate needing a different scope can still set it.
+    @helm template t charts/homebox-mcp --set homebox.url=http://homebox \
+        --set homebox.existingSecret=x {{auth_values}} --set auth.scope=openid+mcp \
+      | grep -A1 'name: SCOPE' | grep -q '"openid+mcp"' \
+      || (echo "FAIL: auth.scope did not override SCOPE"; exit 1)
+    @echo "chart ok: renders, refuses missing values (including auth), a /api url and unknown keys, annotates the Deployment, and wires auth.scope"
 
 # Run against a HomeBox instance over stdio (the default transport).
 run url token:

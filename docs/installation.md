@@ -102,6 +102,7 @@ spec:
 | `homebox.existingSecretTokenKey` | `token` | Key within that Secret. |
 | `auth.issuerUrl` | — | **Required.** access-roster's own URL, exactly as it appears in a token's `iss`. |
 | `auth.resourceUrl` | — | **Required.** This server's own EXTERNAL URL — the RFC 8707 audience access-roster mints tokens for. Must match this resource's id in access-roster's policy, byte for byte. |
+| `auth.scope` | `openid` | Advertised in the PRM's `scopes_supported` and the 401 challenge's `scope`; never checked by this server. access-roster refuses an authorize request with no scope at all, so this exists for a scope-less client to adopt. An estate needing more sets this itself; empty omits both fields. |
 | `image.registry` / `image.repository` | `ghcr.io` / `excavador/homebox-mcp` | |
 | `image.tag` | `""` | Empty means the chart's `appVersion`. Pin it to upgrade deliberately rather than whenever the chart is republished. |
 | `replicaCount` | `1` | The server is stateless, so more than one is safe. |
@@ -149,6 +150,7 @@ two itself.
 | `--addr` | `ADDR` | `0.0.0.0:8080` | HTTP transport only. |
 | `--issuer-url` | `ISSUER_URL` | — | **Required for `http`.** access-roster's own URL. |
 | `--resource-url` | `RESOURCE_URL` | — | **Required for `http`.** This server's own external URL (RFC 8707 audience). |
+| `--scope` | `SCOPE` | `openid` | HTTP transport only. Advertised in the PRM and the 401 challenge; never checked here. |
 
 ## Verifying it works
 
@@ -156,13 +158,15 @@ Without a token, the MCP endpoint refuses:
 
     curl -s -i http://localhost:8080/mcp
 
-answers `401` with a `WWW-Authenticate: Bearer resource_metadata="..."`
-header naming this server's own protected-resource metadata. Fetching that
+answers `401` with a
+`WWW-Authenticate: Bearer resource_metadata="...", scope="openid"` header
+naming this server's own protected-resource metadata. Fetching that
 document (unauthenticated) confirms the wiring:
 
     curl -s http://localhost:8080/.well-known/oauth-protected-resource
 
-which answers `{"resource": "<RESOURCE_URL>", "authorization_servers": ["<ISSUER_URL>"], ...}`.
+which answers `{"resource": "<RESOURCE_URL>", "authorization_servers":
+["<ISSUER_URL>"], "scopes_supported": ["<SCOPE>"], ...}`.
 
 With a real access token (minted by `auth.issuerUrl` for this server's
 resource):

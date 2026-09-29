@@ -10,7 +10,7 @@ import (
 )
 
 func TestAuthMetadata(t *testing.T) {
-	a, err := NewAuth("https://access.excavador.xyz", "https://mcp.excavador.xyz/homebox")
+	a, err := NewAuth("https://access.excavador.xyz", "https://mcp.excavador.xyz/homebox", "openid")
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
 	}
@@ -35,10 +35,36 @@ func TestAuthMetadata(t *testing.T) {
 	if len(servers) != 1 || servers[0] != "https://access.excavador.xyz" {
 		t.Errorf("authorization_servers = %v", body["authorization_servers"])
 	}
+
+	// access-roster refuses an authorize request that carries no scope at
+	// all; the PRM must offer one a scope-less client can adopt.
+	scopes, _ := body["scopes_supported"].([]any)
+	if len(scopes) != 1 || scopes[0] != "openid" {
+		t.Errorf("scopes_supported = %v, want [openid]", body["scopes_supported"])
+	}
+}
+
+func TestAuthMetadataOmitsScopesWhenScopeEmpty(t *testing.T) {
+	a, err := NewAuth("https://access.excavador.xyz", "https://mcp.excavador.xyz/homebox", "")
+	if err != nil {
+		t.Fatalf("NewAuth: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	a.Metadata().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, MetadataPath, nil))
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+
+	if _, ok := body["scopes_supported"]; ok {
+		t.Errorf("scopes_supported = %v, want the field absent for an empty scope", body["scopes_supported"])
+	}
 }
 
 func TestAuthProtectRefusesUnverified(t *testing.T) {
-	a, err := NewAuth("https://access.excavador.xyz", "https://mcp.excavador.xyz/homebox")
+	a, err := NewAuth("https://access.excavador.xyz", "https://mcp.excavador.xyz/homebox", "openid")
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
 	}
@@ -54,8 +80,12 @@ func TestAuthProtectRefusesUnverified(t *testing.T) {
 	}
 
 	// RFC 9728 §3: the well-known segment is inserted before this
-	// resource's own path, not appended after it.
-	want := `Bearer resource_metadata="https://mcp.excavador.xyz/.well-known/oauth-protected-resource/homebox"`
+	// resource's own path, not appended after it. The challenge also
+	// carries `scope`, next to `resource_metadata` -- access-roster
+	// rejects an authorize request with no scope, and the MCP
+	// authorization spec has a client prefer this over the PRM's
+	// scopes_supported.
+	want := `Bearer resource_metadata="https://mcp.excavador.xyz/.well-known/oauth-protected-resource/homebox", scope="openid"`
 	if got := rec.Header().Get("WWW-Authenticate"); got != want {
 		t.Errorf("WWW-Authenticate = %q, want %q", got, want)
 	}
@@ -66,7 +96,7 @@ func TestAuthProtectRefusesUnverified(t *testing.T) {
 }
 
 func TestAuthProtectPassesVerifiedThrough(t *testing.T) {
-	a, err := NewAuth("https://access.excavador.xyz", "https://mcp.excavador.xyz/homebox")
+	a, err := NewAuth("https://access.excavador.xyz", "https://mcp.excavador.xyz/homebox", "openid")
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
 	}
@@ -92,7 +122,7 @@ func TestAuthProtectPassesVerifiedThrough(t *testing.T) {
 }
 
 func TestNewAuthRejectsRelativeResourceURL(t *testing.T) {
-	if _, err := NewAuth("https://access.excavador.xyz", "not-a-url"); err == nil {
+	if _, err := NewAuth("https://access.excavador.xyz", "not-a-url", "openid"); err == nil {
 		t.Fatal("expected an error for a resource url with no scheme or host")
 	}
 }

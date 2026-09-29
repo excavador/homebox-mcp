@@ -92,6 +92,16 @@ func main() {
 				Usage:   "this server's own external URL (http transport only)",
 				Sources: cli.EnvVars("RESOURCE_URL"),
 			},
+			&cli.StringFlag{
+				Name: "scope",
+				// access-roster rejects an authorize request that carries
+				// no scope at all. "openid" is the one it accepts out of
+				// the box; an estate that needs more sets this itself.
+				// Never checked here -- see NewAuth.
+				Usage:   "OAuth scope advertised in the PRM and the 401 challenge (http transport only)",
+				Value:   "openid",
+				Sources: cli.EnvVars("SCOPE"),
+			},
 		},
 		Action: run,
 	}
@@ -130,7 +140,7 @@ func run(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("--issuer-url and --resource-url (or ISSUER_URL / RESOURCE_URL) are required for the http transport")
 	}
 
-	auth, err := server.NewAuth(issuerURL, resourceURL)
+	auth, err := server.NewAuth(issuerURL, resourceURL, c.String("scope"))
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}

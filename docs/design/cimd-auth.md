@@ -97,6 +97,35 @@ This is a deployment's (`opwerm/nexus`, for hive) concern, not this
 repo's — it is documented here so the shape stays associated with the
 code it configures.
 
+## The scope access-roster insists on
+
+access-roster's `/authorize` refuses a request that carries no `scope` at
+all ("The scope of your request is missing"). Claude Code's CIMD client
+document names none, and per the MCP authorization spec's scope-selection
+order a client tries `WWW-Authenticate`'s `scope` first, then the PRM's
+`scopes_supported`, and otherwise sends none — so a scope-less client had
+no way to reach an issuer that requires one.
+
+`Auth` now advertises a `scope` (default `openid`, which access-roster
+accepts) in both places:
+
+- the PRM's `scopes_supported`, and
+- the 401 challenge, next to `resource_metadata`:
+  `Bearer resource_metadata="...", scope="openid"`.
+
+It is a third constructor argument to `NewAuth` and a `--scope` /
+`SCOPE` flag (`cmd/homebox-mcp/main.go`), mirroring how `ISSUER_URL` and
+`RESOURCE_URL` are wired, and a chart value, `auth.scope` (also default
+`openid`) — so an estate that needs a richer scope than `openid` sets it
+without a new release. Kept estate-neutral on purpose: this repo is
+public and carries no estate's own policy.
+
+The scope is **advertised only, never enforced here** — same as before:
+*who* may reach this resource is still entirely access-roster's
+`resources.<uri>.requires`, read once. An empty scope omits both fields
+rather than advertising an empty list, which is not equivalent to
+omitting the field.
+
 ## What a client actually needs to do
 
 Nothing beyond following the MCP authorization spec: discover this
