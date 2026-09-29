@@ -7,7 +7,8 @@
   "required": [
     "image",
     "homebox",
-    "service"
+    "service",
+    "auth"
   ],
   "properties": {
     "nameOverride": {
@@ -95,6 +96,26 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 65535
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issuerUrl",
+        "resourceUrl"
+      ],
+      "properties": {
+        "issuerUrl": {
+          "type": "string",
+          "minLength": 1,
+          "description": "access-roster's own URL, exactly as it appears in a token's `iss`."
+        },
+        "resourceUrl": {
+          "type": "string",
+          "minLength": 1,
+          "description": "This server's own EXTERNAL URL: the RFC 8707 resource indicator a client names, and the audience access-roster mints for it. Must match this resource's id in access-roster's policy, byte for byte."
         }
       }
     },

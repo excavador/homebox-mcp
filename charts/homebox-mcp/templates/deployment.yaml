@@ -37,6 +37,10 @@ spec:
               value: http
             - name: ADDR
               value: "0.0.0.0:{{ .Values.service.port }}"
+            - name: ISSUER_URL
+              value: {{ .Values.auth.issuerUrl | quote }}
+            - name: RESOURCE_URL
+              value: {{ .Values.auth.resourceUrl | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

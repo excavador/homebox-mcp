@@ -21,9 +21,19 @@ service:
   type: ClusterIP
   port: 8080
 
-# The server authenticates NOTHING. It expects a gateway in front of it
-# validating a token. There is no value here that turns auth on, because
-# there is none to turn on.
+# The server validates every request itself against access-roster: no
+# secret to provide here, because a bearer token is never a literal and a
+# CIMD client never registers one. Both are required -- there is no
+# gateway fallback any more.
+auth:
+  # access-roster's own URL, exactly as it appears in a token's `iss`.
+  issuerUrl: ""
+  # This server's own EXTERNAL URL (not its in-cluster Service address):
+  # the RFC 8707 resource indicator a client names, and the audience
+  # access-roster mints a token for. Must match, byte for byte, this
+  # resource's id in access-roster's own policy.
+  resourceUrl: ""
+
 resources:
   requests: {cpu: 20m, memory: 64Mi}
   limits: {memory: 128Mi}
