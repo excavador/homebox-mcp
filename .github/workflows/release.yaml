@@ -14,7 +14,7 @@ jobs:
     permissions:
       contents: write
       packages: write
-    uses: truvity/ci-workflows/.github/workflows/release-public.yaml@1deba8589700d0d5ba433f4790cdacc208f166c5 # v3.13.0
+    uses: truvity/ci-workflows/.github/workflows/release-public.yaml@83a33664e82b4df3764ed4b4544707320b51db92 # v3.13.1
     with:
       charts: '["homebox-mcp"]'
       chart-app-version: release
