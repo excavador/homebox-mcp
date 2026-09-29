@@ -41,6 +41,8 @@ spec:
               value: {{ .Values.auth.issuerUrl | quote }}
             - name: RESOURCE_URL
               value: {{ .Values.auth.resourceUrl | quote }}
+            - name: SCOPE
+              value: {{ .Values.auth.scope | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

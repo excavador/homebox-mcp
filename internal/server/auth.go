@@ -25,10 +25,12 @@ const MetadataPath = "/.well-known/oauth-protected-resource"
 // not the party that serves it -- publishing it is this server's own
 // responsibility (access-roster docs/connect/mcp.md, "Publish RFC 9728").
 type Auth struct {
-	issuer      *identity.Issuer
-	resource    string
-	metadataURL string
-	metadataDoc []byte
+	issuer          *identity.Issuer
+	resource        string
+	scope           string
+	metadataURL     string
+	metadataDoc     []byte
+	challengeHeader string
 }
 
 // NewAuth builds the verifier for one resource.
@@ -38,7 +40,19 @@ type Auth struct {
 // URL: the RFC 8707 resource indicator a client names, and the `aud`
 // access-roster mints for it -- it MUST match, byte for byte, whatever
 // this installation's access-roster policy declares under `resources`.
-func NewAuth(issuerURL, resourceURL string) (*Auth, error) {
+//
+// scope is advertised in both the PRM's `scopes_supported` and the 401
+// challenge's `scope`, but never checked here -- access-roster's own
+// `resources.<uri>.requires` is what actually decides who may reach this
+// resource (see Protect). It exists only because access-roster refuses
+// an authorize request that carries no scope at all ("The scope of your
+// request is missing"): per the MCP authorization spec's scope-selection
+// order, a client uses `WWW-Authenticate`'s `scope` first, then the
+// PRM's `scopes_supported`, and otherwise sends none -- so a client with
+// no scope of its own would otherwise be unable to reach an issuer that
+// requires one. An empty scope omits both fields rather than advertising
+// an empty list, which is not a valid alternative to omitting the field.
+func NewAuth(issuerURL, resourceURL, scope string) (*Auth, error) {
 	u, err := url.Parse(resourceURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("resource url %q is not an absolute URL", resourceURL)
@@ -50,20 +64,30 @@ func NewAuth(issuerURL, resourceURL string) (*Auth, error) {
 	// exactly what mcp.excavador.xyz does for /homebox and /netbox.
 	metadataURL := u.Scheme + "://" + u.Host + MetadataPath + u.Path
 
-	doc, err := json.Marshal(map[string]any{
+	fields := map[string]any{
 		"resource":                 resourceURL,
 		"authorization_servers":    []string{issuerURL},
 		"bearer_methods_supported": []string{"header"},
-	})
+	}
+
+	challenge := `Bearer resource_metadata="` + metadataURL + `"`
+	if scope != "" {
+		fields["scopes_supported"] = []string{scope}
+		challenge += `, scope="` + scope + `"`
+	}
+
+	doc, err := json.Marshal(fields)
 	if err != nil {
 		return nil, err // unreachable: the map above always marshals
 	}
 
 	return &Auth{
-		issuer:      &identity.Issuer{URL: issuerURL, Audience: resourceURL},
-		resource:    resourceURL,
-		metadataURL: metadataURL,
-		metadataDoc: doc,
+		issuer:          &identity.Issuer{URL: issuerURL, Audience: resourceURL},
+		resource:        resourceURL,
+		scope:           scope,
+		metadataURL:     metadataURL,
+		metadataDoc:     doc,
+		challengeHeader: challenge,
 	}, nil
 }
 
@@ -81,7 +105,7 @@ func NewAuth(issuerURL, resourceURL string) (*Auth, error) {
 func (a *Auth) Protect(next http.Handler) http.Handler {
 	refuse := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := identity.FromContext(r.Context()); !ok {
-			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+a.metadataURL+`"`)
+			w.Header().Set("WWW-Authenticate", a.challengeHeader)
 			http.Error(w, "not signed in", http.StatusUnauthorized)
 			return
 		}

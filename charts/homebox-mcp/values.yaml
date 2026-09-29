@@ -33,6 +33,11 @@ auth:
   # access-roster mints a token for. Must match, byte for byte, this
   # resource's id in access-roster's own policy.
   resourceUrl: ""
+  # Advertised in the PRM's scopes_supported and the 401 challenge's
+  # scope -- never checked by this server itself. access-roster refuses
+  # an authorize request with no scope at all; "openid" is the one it
+  # accepts by default. An estate needing more sets this, not the image.
+  scope: openid
 
 resources:
   requests: {cpu: 20m, memory: 64Mi}

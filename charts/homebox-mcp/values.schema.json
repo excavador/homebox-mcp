@@ -116,6 +116,10 @@
           "type": "string",
           "minLength": 1,
           "description": "This server's own EXTERNAL URL: the RFC 8707 resource indicator a client names, and the audience access-roster mints for it. Must match this resource's id in access-roster's policy, byte for byte."
+        },
+        "scope": {
+          "type": "string",
+          "description": "Advertised in the PRM's scopes_supported and the 401 challenge's scope; never checked by this server. Empty omits both fields rather than advertising an empty list."
         }
       }
     },
