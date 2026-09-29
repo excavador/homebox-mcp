@@ -53,15 +53,18 @@ Then point a client at it — see [clients](clients.md).
 The image is multi-arch (`linux/amd64`, `linux/arm64`) and built with ko from
 a distroless static base: no shell, no package manager, runs as non-root.
 
-To serve HTTP instead, set `TRANSPORT=http` and publish the port. **Read
-[the warning](#the-server-has-no-authentication) before you do.**
+To serve HTTP instead, set `TRANSPORT=http` plus `ISSUER_URL` and
+`RESOURCE_URL`, and publish the port. **Read
+[authentication](#authentication) before you do.**
 
 ## 3. On Kubernetes, with the Helm chart
 
     helm install homebox-mcp oci://ghcr.io/excavador/charts/homebox-mcp \
       --version 0.3.0 \
       --set homebox.url=http://homebox \
-      --set homebox.existingSecret=homebox-mcp
+      --set homebox.existingSecret=homebox-mcp \
+      --set auth.issuerUrl=https://access.example \
+      --set auth.resourceUrl=https://mcp.example/homebox
 
 The chart always runs the HTTP transport; stdio in a pod with no attached
 client exits immediately.
@@ -97,6 +100,8 @@ spec:
 | `homebox.url` | — | **Required.** Base URL **without** `/api`; the server appends `/api/v1`. The chart refuses a URL ending in `/api`. |
 | `homebox.existingSecret` | — | **Required.** Secret holding the API key. |
 | `homebox.existingSecretTokenKey` | `token` | Key within that Secret. |
+| `auth.issuerUrl` | — | **Required.** access-roster's own URL, exactly as it appears in a token's `iss`. |
+| `auth.resourceUrl` | — | **Required.** This server's own EXTERNAL URL — the RFC 8707 audience access-roster mints tokens for. Must match this resource's id in access-roster's policy, byte for byte. |
 | `image.registry` / `image.repository` | `ghcr.io` / `excavador/homebox-mcp` | |
 | `image.tag` | `""` | Empty means the chart's `appVersion`. Pin it to upgrade deliberately rather than whenever the chart is republished. |
 | `replicaCount` | `1` | The server is stateless, so more than one is safe. |
@@ -108,18 +113,22 @@ spec:
 The schema sets `additionalProperties: false`, so a typo like
 `replicaCounts` fails to render instead of being silently ignored.
 
-### The server has no authentication
+### Authentication
 
-The chart deliberately offers nothing that turns authentication on, because
-the server has none. It expects a gateway in front of it that validates a
-token.
+The server validates every request itself against access-roster: a bearer
+token, checked against `auth.issuerUrl`'s JWKS, with `aud` required to
+equal `auth.resourceUrl` exactly (RFC 8707). Both values are required —
+there is no way to render the chart, or start the http transport directly,
+without them, and no gateway fallback any more. See
+[design/cimd-auth.md](design/cimd-auth.md) for the full design and the
+exact access-roster policy this expects.
 
 A `Service` of type `ClusterIP` and no Ingress or HTTPRoute is the safe
-default the chart ships. **Do not expose it** until something in front is
-checking credentials. On hive that is Envoy Gateway with a `SecurityPolicy`
-validating a Zitadel-issued JWT against the `homebox` project audience; the
-route and policy live in the cluster repo, not in this chart, because they
-are site-specific.
+default the chart ships regardless — routing and TLS termination are
+still a deployment's own concern (a Gateway, an Ingress, a plain
+port-forward), because those are site-specific. What changed is that
+whatever fronts the Service no longer needs to be the thing that decides
+who may call it.
 
 ### Health
 
@@ -138,12 +147,28 @@ two itself.
 | `--homebox-token` | `HOMEBOX_TOKEN` | — | **Required.** HomeBox API key. |
 | `--transport` | `TRANSPORT` | `stdio` | `stdio` or `http`. |
 | `--addr` | `ADDR` | `0.0.0.0:8080` | HTTP transport only. |
+| `--issuer-url` | `ISSUER_URL` | — | **Required for `http`.** access-roster's own URL. |
+| `--resource-url` | `RESOURCE_URL` | — | **Required for `http`.** This server's own external URL (RFC 8707 audience). |
 
 ## Verifying it works
 
-Over HTTP, the MCP endpoint is `/mcp`:
+Without a token, the MCP endpoint refuses:
+
+    curl -s -i http://localhost:8080/mcp
+
+answers `401` with a `WWW-Authenticate: Bearer resource_metadata="..."`
+header naming this server's own protected-resource metadata. Fetching that
+document (unauthenticated) confirms the wiring:
+
+    curl -s http://localhost:8080/.well-known/oauth-protected-resource
+
+which answers `{"resource": "<RESOURCE_URL>", "authorization_servers": ["<ISSUER_URL>"], ...}`.
+
+With a real access token (minted by `auth.issuerUrl` for this server's
+resource):
 
     curl -s -X POST http://localhost:8080/mcp \
+      -H "Authorization: Bearer $TOKEN" \
       -H 'Content-Type: application/json' \
       -H 'Accept: application/json, text/event-stream' \
       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{

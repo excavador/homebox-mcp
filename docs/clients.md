@@ -19,17 +19,20 @@ just the current directory.
 
 ## Claude Code, over HTTP
 
-If it is deployed behind a gateway that speaks OAuth:
-
     claude mcp add --transport http homebox https://mcp.example.com/homebox
 
-Claude Code follows the MCP authorization spec: it fetches the protected
-resource metadata, discovers the authorization server, registers, and opens
-a browser for you to log in. That requires three documents to be served
-alongside the MCP endpoint, which is gateway configuration rather than
-anything this server does — see the deployment notes in your cluster repo.
+Claude Code follows the MCP authorization spec: it requests the endpoint,
+gets a `401` naming this server's own protected-resource metadata, follows
+that to discover access-roster as the authorization server, and opens a
+browser for you to log in. It identifies itself with a Client ID Metadata
+Document it already serves at a fixed URL of its own
+(`https://claude.ai/oauth/claude-code-client-metadata`) — nothing to
+register, nothing to configure on the client side, provided access-roster's
+policy allow-lists `claude.ai` under `client_documents.origins` (see
+[design/cimd-auth.md](design/cimd-auth.md)).
 
-If the gateway simply checks a static header instead, skip the OAuth flow:
+If the deployment predates that policy change, or the client you are using
+does not support CIMD, connect with a manually-minted token instead:
 
     claude mcp add --transport http homebox https://mcp.example.com/homebox \
       --header "Authorization: Bearer ..."

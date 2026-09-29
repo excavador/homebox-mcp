@@ -30,7 +30,8 @@ Full instructions, including the Helm chart, are in
 |---|---|
 | [Installation](docs/installation.md) | binary, container and Helm chart; every value and env var |
 | [Connecting a client](docs/clients.md) | Claude Code over stdio and HTTP; what to expect from the tools |
-| [Architecture](docs/architecture.md) | the request path, why the server authenticates nothing, what is load-bearing |
+| [Architecture](docs/architecture.md) | the request path, how the server authenticates callers, what is load-bearing |
+| [CIMD auth design](docs/design/cimd-auth.md) | why and how the server validates bearer tokens against access-roster |
 | [Development](docs/development.md) | devbox, `just check`, testing, releasing, adding a tool |
 
 ## What it exposes
@@ -85,11 +86,16 @@ accept an OIDC token — HomeBox's OIDC support is a browser redirect flow that
 ends by *issuing* one of these keys. Data is scoped by **group**, not by
 user, so the key sees whatever its owner's group contains.
 
-**The HTTP transport authenticates nothing.** It is built to sit behind a
-gateway that validates a token. Exposed directly to a network, it is the
-whole inventory, unauthenticated and writable. There is no setting that turns
-authentication on, because there is none to turn on — see
-[architecture](docs/architecture.md#the-server-authenticates-nothing).
+**The HTTP transport validates every request itself.** A bearer token minted
+by [access-roster](https://github.com/truvity/access-roster), checked against
+its JWKS with this server's own resource URL as the required audience (RFC
+8707). `ISSUER_URL` and `RESOURCE_URL` are both required — there is no way to
+start the http transport, or render the chart, without them, and no gateway
+fallback. A client identifies itself the way the MCP authorization spec
+recommends now that dynamic registration is deprecated there: a Client ID
+Metadata Document, an HTTPS URL access-roster's policy allows. See
+[architecture](docs/architecture.md#the-server-validates-its-own-bearer-tokens)
+and [the design doc](docs/design/cimd-auth.md).
 
 ## Why this exists rather than a fork
 

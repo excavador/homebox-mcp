@@ -43,4 +43,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if not .Values.homebox.existingSecret -}}
 {{- fail "homebox.existingSecret is required: the API token is never a literal in values" -}}
 {{- end -}}
+{{- if not .Values.auth.issuerUrl -}}
+{{- fail "auth.issuerUrl is required: the server validates every request against access-roster itself" -}}
+{{- end -}}
+{{- if not .Values.auth.resourceUrl -}}
+{{- fail "auth.resourceUrl is required: it is this server's own external URL, the RFC 8707 audience access-roster mints tokens for" -}}
+{{- end -}}
 {{- end -}}

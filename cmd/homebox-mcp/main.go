@@ -10,10 +10,16 @@
 //	stdio       the default, for running it locally next to a client
 //	http        streamable HTTP, for running it in a cluster
 //
-// The HTTP transport does NO authentication of its own. It is meant to sit
-// behind a gateway that validates a token -- on hive that is Envoy checking
-// a Zitadel-issued JWT against the homebox project audience. Exposing this
-// directly to a network is exposing the whole inventory.
+// The HTTP transport validates every request itself: a bearer token minted
+// by access-roster (github.com/truvity/access-roster), checked against its
+// JWKS with this server's own resource URL as the required audience (RFC
+// 8707), and its own RFC 9728 Protected Resource Metadata document so a
+// client can discover that issuer without being told out of band. A client
+// identifies itself the way the Model Context Protocol's authorization
+// spec recommends now that dynamic registration is deprecated there: a
+// Client ID Metadata Document, an HTTPS URL access-roster's policy allows.
+// See docs/design/cimd-auth.md. Exposing this with no --issuer-url and
+// --resource-url set is exposing the whole inventory.
 package main
 
 import (
@@ -73,6 +79,19 @@ func main() {
 				Value:   "0.0.0.0:8080",
 				Sources: cli.EnvVars("ADDR"),
 			},
+			&cli.StringFlag{
+				Name:    "issuer-url",
+				Usage:   "access-roster issuer that mints tokens for this resource (http transport only)",
+				Sources: cli.EnvVars("ISSUER_URL"),
+			},
+			&cli.StringFlag{
+				Name: "resource-url",
+				// The RFC 8707 resource indicator a client names and the
+				// audience access-roster mints for it -- this server's own
+				// externally-reachable URL, not its in-cluster address.
+				Usage:   "this server's own external URL (http transport only)",
+				Sources: cli.EnvVars("RESOURCE_URL"),
+			},
 		},
 		Action: run,
 	}
@@ -105,16 +124,29 @@ func run(ctx context.Context, c *cli.Command) error {
 		return s.Run(ctx, &mcp.StdioTransport{})
 	}
 
+	issuerURL := c.String("issuer-url")
+	resourceURL := c.String("resource-url")
+	if issuerURL == "" || resourceURL == "" {
+		return fmt.Errorf("--issuer-url and --resource-url (or ISSUER_URL / RESOURCE_URL) are required for the http transport")
+	}
+
+	auth, err := server.NewAuth(issuerURL, resourceURL)
+	if err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+
 	handler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return s }, nil)
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", handler)
-	mux.Handle("/mcp/", handler)
+	mux.Handle("/mcp", auth.Protect(handler))
+	mux.Handle("/mcp/", auth.Protect(handler))
+	mux.Handle(server.MetadataPath, auth.Metadata())
 
 	// Liveness only. It deliberately does NOT call HomeBox: a probe that
 	// fails when a dependency is briefly unavailable restarts a process
-	// that would otherwise have recovered on its own.
+	// that would otherwise have recovered on its own. It is also, on
+	// purpose, unauthenticated -- a probe carries no bearer token.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")

@@ -6,15 +6,15 @@ request to HomeBox, and the process can be restarted or scaled at will.
 
 ## The request path
 
-Running in a cluster behind a gateway:
-
-    Claude Code
-      │  MCP over streamable HTTP, Authorization: Bearer <OIDC access token>
-      ▼
-    Envoy Gateway ── SecurityPolicy: validate JWT, check audience
-      │  forwards only if the token is for THIS server's audience
+    Claude Code (or any MCP client)
+      │  presents client_id = an HTTPS URL to its own Client ID Metadata
+      │  Document (CIMD) -- no pre-registration, no DCR
+      │  gets back an access token: iss=access-roster, aud=this resource
+      │  MCP over streamable HTTP, Authorization: Bearer <access token>
       ▼
     homebox-mcp  (TRANSPORT=http, listening on :8080/mcp)
+      │  validates the token itself: signature against access-roster's
+      │  JWKS, iss, and aud == RESOURCE_URL (RFC 8707) -- see auth.go
       │  Authorization: Bearer <HomeBox API key>
       ▼
     HomeBox  /api/v1/...
@@ -22,32 +22,37 @@ Running in a cluster behind a gateway:
 Two different credentials, and conflating them is the mistake this design
 exists to prevent:
 
-- The **caller's** token is an OIDC access token identifying a person. The
-  gateway validates it. `homebox-mcp` never reads it.
+- The **caller's** token is an access-roster access token identifying a
+  person, bound to this server's own resource URL as its audience.
+  `homebox-mcp` verifies it itself, in-process — see
+  [design/cimd-auth.md](design/cimd-auth.md) for why authentication moved
+  from a perimeter gateway into the binary.
 - The **server's** token is a HomeBox API key, held in a Kubernetes Secret and
   read once at startup. HomeBox accepts nothing else — its OIDC support is a
   browser redirect flow that ends by *issuing* one of these keys.
 
-### The server authenticates nothing
+### The server validates its own bearer tokens
 
-This is deliberate and it is the single most important thing to know before
-deploying it. There is no `MCP_AUTH_TOKEN`, no allowlist, no value in the
-chart that turns authentication on, because there is none to turn on.
+`ISSUER_URL` and `RESOURCE_URL` are both required for the http transport --
+there is no gateway fallback. The server verifies a request's bearer token
+against access-roster's own JWKS, requires `aud` to equal `RESOURCE_URL`
+exactly (RFC 8707), and serves its own OAuth 2.0 Protected Resource Metadata
+at `/.well-known/oauth-protected-resource` (RFC 9728) so a compliant client
+can discover access-roster without being told out of band. See
+[design/cimd-auth.md](design/cimd-auth.md).
 
-The gateway is the only gate. Exposed directly to a network, the process is
-the entire inventory, unauthenticated and writable.
-
-The upside is that authorisation lives in one place that already does it
-properly — on hive, Envoy validating a Zitadel-issued JWT against the
-`homebox` project audience — rather than in a second, weaker implementation
-inside the server.
+Exposed with no `ISSUER_URL`/`RESOURCE_URL` set, the process refuses to
+start the http transport at all -- there is no way to accidentally run it
+unauthenticated.
 
 ### One shared identity, and what that costs
 
-Behind the gateway every caller is identical. The server holds one API key
-and makes every request with it, so HomeBox attributes every change to that
-key rather than to the person who asked for it. **HomeBox's audit trail
-cannot tell one user's deletion from another's.**
+Every caller access-roster admits is still one HomeBox API key as far as
+HomeBox itself is concerned: the server makes every request with it, so
+HomeBox attributes every change to that key rather than to the person who
+asked for it. **HomeBox's audit trail cannot tell one user's deletion from
+another's** -- access-roster identifies *who may reach this server*, not who
+HomeBox believes made a given change.
 
 That is accepted for a household whose users already share a HomeBox group
 and can already edit everything through the browser. It is not acceptable
