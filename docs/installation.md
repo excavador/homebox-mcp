@@ -163,7 +163,7 @@ answers `401` with a
 naming this server's own protected-resource metadata. Fetching that
 document (unauthenticated) confirms the wiring:
 
-    curl -s http://localhost:8080/.well-known/oauth-protected-resource
+    curl -s http://localhost:8080/.well-known/oauth-protected-resource/<path of RESOURCE_URL>
 
 which answers `{"resource": "<RESOURCE_URL>", "authorization_servers":
 ["<ISSUER_URL>"], "scopes_supported": ["<SCOPE>"], ...}`.

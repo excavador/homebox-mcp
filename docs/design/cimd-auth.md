@@ -49,10 +49,12 @@ to allow-list for that client.
 
 **Added:**
 
-- `internal/server/auth.go`: `Auth`, wrapping the MCP handler with a
-  bearer-token check against access-roster (`github.com/truvity/access-roster/identity`)
-  and serving this server's own RFC 9728 Protected Resource Metadata at
-  `/.well-known/oauth-protected-resource`.
+- Auth from access-roster's shared Go library,
+  `github.com/truvity/access-roster/identity/resource`: it wraps the MCP
+  handler with a bearer-token check against access-roster and serves this
+  server's own RFC 9728 Protected Resource Metadata at the well-known path
+  for the resource URL. (This was first a local `internal/server/auth.go`;
+  that copy was identical in every MCP server and now lives in the library.)
 - Two new required settings for the http transport: `ISSUER_URL`
   (access-roster's own URL) and `RESOURCE_URL` (this server's own
   external URL — the RFC 8707 resource indicator / JWT audience). Both
@@ -66,7 +68,7 @@ to allow-list for that client.
 
 - The upstream HomeBox credential (`HOMEBOX_TOKEN`) and everything about
   how this server talks to HomeBox.
-- No group/scope vocabulary was added here. `Auth.Protect` requires only
+- No group/scope vocabulary was added here. `resource.Resource.Protect` requires only
   that access-roster vouches for the caller at all — *who* may reach this
   resource is entirely access-roster's `resources.<this URL>.requires`,
   read once, in one place, not duplicated into a second check here.
@@ -106,14 +108,14 @@ order a client tries `WWW-Authenticate`'s `scope` first, then the PRM's
 `scopes_supported`, and otherwise sends none — so a scope-less client had
 no way to reach an issuer that requires one.
 
-`Auth` now advertises a `scope` (default `openid`, which access-roster
+The resource now advertises a `scope` (default `openid`, which access-roster
 accepts) in both places:
 
 - the PRM's `scopes_supported`, and
 - the 401 challenge, next to `resource_metadata`:
   `Bearer resource_metadata="...", scope="openid"`.
 
-It is a third constructor argument to `NewAuth` and a `--scope` /
+It is `Scope` in the library's `resource.Config` and a `--scope` /
 `SCOPE` flag (`cmd/homebox-mcp/main.go`), mirroring how `ISSUER_URL` and
 `RESOURCE_URL` are wired, and a chart value, `auth.scope` (also default
 `openid`) — so an estate that needs a richer scope than `openid` sets it
@@ -136,3 +138,24 @@ one) or a CIMD `client_id` URL if it has one and the issuer advertises
 `client_id_metadata_document_supported: true`. A client with neither has
 no way to reach this server — the mechanism does not fall back to
 unauthenticated access.
+
+## Behaviour differences after moving to the shared library
+
+Moving to `identity/resource` kept the contract above (bearer check against
+`ISSUER_URL`/`RESOURCE_URL`, the PRM, the 401 challenge with
+`resource_metadata` and `scope`, the `--scope`/`SCOPE` setting) and changed
+two things:
+
+- **Well-known path.** The metadata is served at the RFC 9728 §3.1 path of
+  the resource URL: the well-known prefix followed by the resource's own
+  path (`/.well-known/oauth-protected-resource/netbox` for
+  `https://mcp.example.com/netbox`). A resource at the root of its host
+  (`https://mcp.example.com/`, or no path) is served at the bare prefix. The
+  bare prefix is also still answered for a resource with a path, as an alias
+  for a gateway that rewrites to it; with several resources on one host,
+  route the bare form to one pod only.
+- **Issuer unreachable answers 503.** If the issuer's discovery document or
+  keys cannot be fetched, a request now gets `503 Service Unavailable`
+  rather than a `401`, so a legitimate caller is not sent to sign in again
+  during an outage. A token that was presented and does not verify gets
+  `401` with `error="invalid_token"` added to the challenge.

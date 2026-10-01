@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/truvity/access-roster/identity/resource"
 	"github.com/urfave/cli/v3"
 
 	"github.com/excavador/homebox-mcp/internal/homebox"
@@ -97,7 +98,7 @@ func main() {
 				// access-roster rejects an authorize request that carries
 				// no scope at all. "openid" is the one it accepts out of
 				// the box; an estate that needs more sets this itself.
-				// Never checked here -- see NewAuth.
+				// Never checked here -- see resource.Config.Scope.
 				Usage:   "OAuth scope advertised in the PRM and the 401 challenge (http transport only)",
 				Value:   "openid",
 				Sources: cli.EnvVars("SCOPE"),
@@ -140,7 +141,11 @@ func run(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("--issuer-url and --resource-url (or ISSUER_URL / RESOURCE_URL) are required for the http transport")
 	}
 
-	auth, err := server.NewAuth(issuerURL, resourceURL, c.String("scope"))
+	auth, err := resource.New(resource.Config{
+		IssuerURL:   issuerURL,
+		ResourceURL: resourceURL,
+		Scope:       c.String("scope"),
+	})
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
@@ -151,7 +156,13 @@ func run(ctx context.Context, c *cli.Command) error {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", auth.Protect(handler))
 	mux.Handle("/mcp/", auth.Protect(handler))
-	mux.Handle(server.MetadataPath, auth.Metadata())
+	// RFC 9728 puts the resource's own path after the well-known prefix. The
+	// bare prefix is kept as an alias for a gateway that rewrites a
+	// path-suffixed request to it (it is the same document).
+	mux.Handle(auth.Path(), auth.Metadata())
+	if auth.Path() != resource.MetadataPath {
+		mux.Handle(resource.MetadataPath, auth.Metadata())
+	}
 
 	// Liveness only. It deliberately does NOT call HomeBox: a probe that
 	// fails when a dependency is briefly unavailable restarts a process
