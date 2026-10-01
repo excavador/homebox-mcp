@@ -14,7 +14,7 @@ request to HomeBox, and the process can be restarted or scaled at will.
       ▼
     homebox-mcp  (TRANSPORT=http, listening on :8080/mcp)
       │  validates the token itself: signature against access-roster's
-      │  JWKS, iss, and aud == RESOURCE_URL (RFC 8707) -- see auth.go
+      │  JWKS, iss, and aud == RESOURCE_URL (RFC 8707) -- by access-roster's identity/resource
       │  Authorization: Bearer <HomeBox API key>
       ▼
     HomeBox  /api/v1/...
@@ -37,8 +37,12 @@ exists to prevent:
 there is no gateway fallback. The server verifies a request's bearer token
 against access-roster's own JWKS, requires `aud` to equal `RESOURCE_URL`
 exactly (RFC 8707), and serves its own OAuth 2.0 Protected Resource Metadata
-at `/.well-known/oauth-protected-resource` (RFC 9728) so a compliant client
-can discover access-roster without being told out of band. See
+at the RFC 9728 well-known path for `RESOURCE_URL`
+(`/.well-known/oauth-protected-resource` plus the resource's own path) so a
+compliant client can discover access-roster without being told out of band.
+All of this comes from the shared access-roster library
+`github.com/truvity/access-roster/identity/resource`; if the issuer cannot be
+reached the server answers `503`, not `401`. See
 [design/cimd-auth.md](design/cimd-auth.md).
 
 Exposed with no `ISSUER_URL`/`RESOURCE_URL` set, the process refuses to

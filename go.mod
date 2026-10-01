@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
-	github.com/truvity/access-roster v1.39.0
+	github.com/truvity/access-roster v1.41.0
 	github.com/urfave/cli/v3 v3.11.0
 )
 
