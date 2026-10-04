@@ -2,7 +2,7 @@
 
 This server used to authenticate nothing and rely entirely on a gateway
 in front of it. It now validates a bearer token itself, against
-[access-roster](https://github.com/truvity/access-roster) (v1.29.0+,
+[access-roster](https://github.com/truvity/sluis) (v1.29.0+,
 which introduced both the `resources` table and `client_documents`; the
 estate runs v1.39.0+), following the Model Context Protocol's
 authorization spec. This document records what changed and why, so the
@@ -50,7 +50,7 @@ to allow-list for that client.
 **Added:**
 
 - Auth from access-roster's shared Go library,
-  `github.com/truvity/access-roster/identity/resource`: it wraps the MCP
+  `github.com/truvity/sluis/identity/resource`: it wraps the MCP
   handler with a bearer-token check against access-roster and serves this
   server's own RFC 9728 Protected Resource Metadata at the well-known path
   for the resource URL. (This was first a local `internal/server/auth.go`;
@@ -92,7 +92,7 @@ client_documents:
 different gates that both apply: the first says who may reach *this*
 server, the second says who may use *any* client identified by a document
 served from an allow-listed origin. See access-roster's own
-[docs/connect/mcp.md](https://github.com/truvity/access-roster/blob/master/docs/connect/mcp.md)
+[docs/connect/mcp.md](https://github.com/truvity/sluis/blob/master/docs/connect/mcp.md)
 for the full mechanism.
 
 This is a deployment's (`opwerm/nexus`, for hive) concern, not this

@@ -11,7 +11,7 @@
 //	http        streamable HTTP, for running it in a cluster
 //
 // The HTTP transport validates every request itself: a bearer token minted
-// by access-roster (github.com/truvity/access-roster), checked against its
+// by access-roster (github.com/truvity/sluis), checked against its
 // JWKS with this server's own resource URL as the required audience (RFC
 // 8707), and its own RFC 9728 Protected Resource Metadata document so a
 // client can discover that issuer without being told out of band. A client
@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/truvity/access-roster/identity/resource"
+	"github.com/truvity/sluis/identity/resource"
 	"github.com/urfave/cli/v3"
 
 	"github.com/excavador/homebox-mcp/internal/homebox"
