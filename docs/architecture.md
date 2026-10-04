@@ -41,7 +41,7 @@ at the RFC 9728 well-known path for `RESOURCE_URL`
 (`/.well-known/oauth-protected-resource` plus the resource's own path) so a
 compliant client can discover access-roster without being told out of band.
 All of this comes from the shared access-roster library
-`github.com/truvity/access-roster/identity/resource`; if the issuer cannot be
+`github.com/truvity/sluis/identity/resource`; if the issuer cannot be
 reached the server answers `503`, not `401`. See
 [design/cimd-auth.md](design/cimd-auth.md).
 

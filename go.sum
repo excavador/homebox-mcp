@@ -47,8 +47,8 @@ github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfv
 github.com/segmentio/encoding v0.5.4/go.mod h1:HS1ZKa3kSN32ZHVZ7ZLPLXWvOVIiZtyJnO1gPH1sKt0=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/truvity/access-roster v1.41.0 h1:mxQu4BPR34ZBcWcTydlZ5ZDtyir4IBdAA03ZWKuaWZs=
-github.com/truvity/access-roster v1.41.0/go.mod h1:tdy6dw8DKCgeIBMlASWjKcQSVqCxuA84kEzfBFSoJFI=
+github.com/truvity/sluis v1.57.0 h1:jaOp29if6qpSJzUFENL9Psj1PemEGaCpsZ5FgMz418E=
+github.com/truvity/sluis v1.57.0/go.mod h1:pOK5/EEZXRSRKfGNZJd2H/T3edVdIVQ34kHsAoQM4ng=
 github.com/urfave/cli/v3 v3.11.0 h1:P/euJp99kb9p0tlVY+iYTLYYTAQlfl0hR2gUO1Img1Q=
 github.com/urfave/cli/v3 v3.11.0/go.mod h1:ysVLtOEmg2tOy6PknnYVhDoouyC/6N42TMeoMzskhso=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=

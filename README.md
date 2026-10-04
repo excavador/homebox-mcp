@@ -87,7 +87,7 @@ ends by *issuing* one of these keys. Data is scoped by **group**, not by
 user, so the key sees whatever its owner's group contains.
 
 **The HTTP transport validates every request itself.** A bearer token minted
-by [access-roster](https://github.com/truvity/access-roster), checked against
+by [access-roster](https://github.com/truvity/sluis), checked against
 its JWKS with this server's own resource URL as the required audience (RFC
 8707). `ISSUER_URL` and `RESOURCE_URL` are both required — there is no way to
 start the http transport, or render the chart, without them, and no gateway
