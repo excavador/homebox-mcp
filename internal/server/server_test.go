@@ -1,16 +1,20 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/excavador/homebox-mcp/internal/fetch"
 	"github.com/excavador/homebox-mcp/internal/homebox"
 )
 
@@ -514,5 +518,198 @@ func TestUpdateHonoursExplicitTags(t *testing.T) {
 
 	if len(h.tags) != 1 || h.tags[0] != "new" {
 		t.Errorf("tags = %v, want [new]", h.tags)
+	}
+}
+
+var testPNG = append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...)
+
+// HomeBox's attachment endpoint is multipart, and answers with the whole
+// entity. The tool must send file, type, primary and name, and hand back the
+// attachment it just made rather than the entity.
+func TestCreateAttachmentSendsMultipart(t *testing.T) {
+	var (
+		gotPath, gotAuth, gotCT string
+		form                    = map[string]string{}
+		file                    []byte
+		fileCT, fileName        string
+	)
+
+	cs := connect(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"e1","attachments":[{"id":"old","type":"photo","title":"old.png"}]}`))
+
+			return
+		}
+
+		gotPath, gotAuth, gotCT = r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type")
+
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("not multipart: %v", err)
+			return
+		}
+
+		for k, v := range r.MultipartForm.Value {
+			form[k] = v[0]
+		}
+
+		fh := r.MultipartForm.File["file"][0]
+		fileName, fileCT = fh.Filename, fh.Header.Get("Content-Type")
+		f, _ := fh.Open()
+		file, _ = io.ReadAll(f)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"e1","attachments":[` +
+			`{"id":"old","type":"photo","primary":true,"title":"old.png"},` +
+			`{"id":"a1","type":"photo","primary":true,"title":"front.png"}]}`))
+	}))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "homebox_create_attachment",
+		Arguments: map[string]any{
+			"id": "e1", "primary": true, "name": "../front.png",
+			"data_base64": base64.StdEncoding.EncodeToString(testPNG),
+		},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("call: %v %+v", err, res)
+	}
+
+	if gotPath != "/api/v1/entities/e1/attachments" {
+		t.Errorf("path = %s", gotPath)
+	}
+
+	if gotAuth != "Bearer t" || !strings.HasPrefix(gotCT, "multipart/form-data") {
+		t.Errorf("auth = %q, content-type = %q", gotAuth, gotCT)
+	}
+
+	if form["type"] != "photo" || form["primary"] != "true" || form["name"] != "front.png" {
+		t.Errorf("form = %v, want type=photo (the default), primary=true, a sanitised name", form)
+	}
+
+	if !bytes.Equal(file, testPNG) || fileName != "front.png" || fileCT != "image/png" {
+		t.Errorf("file part = %q %q %d bytes", fileName, fileCT, len(file))
+	}
+
+	out, _ := res.StructuredContent.(map[string]any)
+	if out["id"] != "a1" || out["type"] != "photo" || out["primary"] != true || out["title"] != "front.png" {
+		t.Errorf("result = %v, want the new attachment, not the entity", out)
+	}
+}
+
+func TestCreateAttachmentRefusesBadInput(t *testing.T) {
+	hits := 0
+	cs := connect(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	b64 := base64.StdEncoding.EncodeToString(testPNG)
+
+	for name, args := range map[string]map[string]any{
+		"no id":         {"data_base64": b64},
+		"no source":     {"id": "e1"},
+		"both sources":  {"id": "e1", "data_base64": b64, "url": "https://example.com/a.png"},
+		"unknown type":  {"id": "e1", "data_base64": b64, "type": "thumbnail"},
+		"http url":      {"id": "e1", "url": "http://example.com/a.png"},
+		"private url":   {"id": "e1", "url": "https://127.0.0.1/a.png"},
+		"not an image":  {"id": "e1", "data_base64": base64.StdEncoding.EncodeToString([]byte("<html>"))},
+		"pdf for photo": {"id": "e1", "data_base64": base64.StdEncoding.EncodeToString([]byte("%PDF-1.7 ...."))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "homebox_create_attachment", Arguments: args})
+			if err == nil && !res.IsError {
+				t.Fatal("want an error")
+			}
+		})
+	}
+
+	if hits != 0 {
+		t.Errorf("HomeBox was called %d times; a refused input must never reach it", hits)
+	}
+}
+
+// Titles are not unique, so the new attachment is the one id that was not
+// there before. Here the old and the new share a title and come back shuffled.
+func TestCreateAttachmentIdentifiesTheNewOneByID(t *testing.T) {
+	post := `{"id":"e1","attachments":[` +
+		`{"id":"new","type":"photo","primary":false,"title":"front.png"},` +
+		`{"id":"b","type":"photo","title":"front.png"},` +
+		`{"id":"a","type":"photo","title":"front.png"}]}`
+
+	run := func(t *testing.T, postBody string) map[string]any {
+		cs := connect(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"id":"e1","attachments":[` +
+					`{"id":"a","type":"photo","title":"front.png"},{"id":"b","type":"photo","title":"front.png"}]}`))
+
+				return
+			}
+
+			_, _ = w.Write([]byte(postBody))
+		}))
+
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "homebox_create_attachment",
+			Arguments: map[string]any{
+				"id": "e1", "name": "front.png",
+				"data_base64": base64.StdEncoding.EncodeToString(testPNG),
+			},
+		})
+		if err != nil || res.IsError {
+			t.Fatalf("call: %v %+v", err, res)
+		}
+
+		out, _ := res.StructuredContent.(map[string]any)
+
+		return out
+	}
+
+	if out := run(t, post); out["id"] != "new" {
+		t.Errorf("id = %v, want new -- title matching picked an old attachment", out["id"])
+	}
+
+	// Nothing new, or two new: do not guess.
+	for name, body := range map[string]string{
+		"none new": `{"id":"e1","attachments":[{"id":"a","title":"front.png"},{"id":"b","title":"front.png"}]}`,
+		"two new":  `{"id":"e1","attachments":[{"id":"a"},{"id":"b"},{"id":"n1"},{"id":"n2"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := run(t, body)
+			if _, ok := out["note"].(string); !ok || out["id"] != "e1" {
+				t.Errorf("out = %v, want the raw entity plus a note", out)
+			}
+		})
+	}
+}
+
+func TestFileName(t *testing.T) {
+	long := strings.Repeat("é", 200)
+
+	for name, tc := range map[string]struct{ given, ct, want string }{
+		"keeps matching ext":  {"front.png", "image/png", "front.png"},
+		"html becomes gif":    {"x.html", "image/gif", "x.gif"},
+		"svg becomes gif":     {"x.svg", "image/gif", "x.gif"},
+		"jpeg ext normalised": {"x.jpeg", "image/jpeg", "x.jpg"},
+		"no ext":              {"photo", "image/webp", "photo.webp"},
+		"pdf":                 {"manual.exe", "application/pdf", "manual.pdf"},
+		"empty":               {"", "image/png", "upload.png"},
+		"dotdot":              {"..", "image/png", "upload.png"},
+		"dotdot inside":       {"a..b.png", "image/png", "a.b.png"},
+		"directory":           {"../../etc/passwd", "image/png", "passwd.png"},
+		"backslash dir":       {`C:\\x\\y.png`, "image/png", "y.png"},
+		"control chars":       {"a\x00b\nc.png", "image/png", "abc.png"},
+		"bidi override":       {"cod\u202Egnp.exe", "image/png", "codgnp.png"},
+		"bidi isolate":        {"a\u2066b\u2069.png", "image/png", "ab.png"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := fileName(tc.given, &fetch.File{ContentType: tc.ct}); got != tc.want {
+				t.Errorf("fileName(%q) = %q, want %q", tc.given, got, tc.want)
+			}
+		})
+	}
+
+	got := fileName(long+".png", &fetch.File{ContentType: "image/png"})
+	if len(got) > 120 || !strings.HasSuffix(got, ".png") || !utf8.ValidString(got) {
+		t.Errorf("long name = %d bytes %q, want <=120, valid UTF-8, extension kept", len(got), got)
 	}
 }
