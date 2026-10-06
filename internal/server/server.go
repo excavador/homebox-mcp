@@ -25,10 +25,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
+	"strings"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/excavador/homebox-mcp/internal/fetch"
 	"github.com/excavador/homebox-mcp/internal/homebox"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -75,7 +78,7 @@ func New(c *homebox.Client, version string) *mcp.Server {
 	addEntityTypes(s, c)
 	addTemplates(s, c)
 	addMaintenance(s, c)
-	addAttachments(s, c)
+	addAttachments(s, c, fetch.New())
 	addLookups(s, c)
 	addConfiguration(s, c)
 
@@ -404,7 +407,7 @@ func addMaintenance(s *mcp.Server, c *homebox.Client) {
 	})
 }
 
-func addAttachments(s *mcp.Server, c *homebox.Client) {
+func addAttachments(s *mcp.Server, c *homebox.Client, f *fetch.Fetcher) {
 	type attArgs struct {
 		ID           string         `json:"id" jsonschema:"the entity UUID"`
 		AttachmentID string         `json:"attachmentId,omitempty" jsonschema:"the attachment UUID"`
@@ -413,7 +416,7 @@ func addAttachments(s *mcp.Server, c *homebox.Client) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "homebox_get_attachment",
-		Description: "One attachment's metadata. Binary uploads are not supported by this server -- use the HomeBox UI.",
+		Description: "One attachment's metadata. To add one, use homebox_create_attachment.",
 		Annotations: readOnly(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a attArgs) (*mcp.CallToolResult, any, error) {
 		if a.ID == "" || a.AttachmentID == "" {
@@ -423,6 +426,8 @@ func addAttachments(s *mcp.Server, c *homebox.Client) {
 		return call(ctx, c, http.MethodGet,
 			"/entities/"+url.PathEscape(a.ID)+"/attachments/"+url.PathEscape(a.AttachmentID), nil, nil)
 	})
+
+	addCreateAttachment(s, c, f)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "homebox_update_attachment", Description: "Rename or re-type an attachment.",
@@ -446,6 +451,134 @@ func addAttachments(s *mcp.Server, c *homebox.Client) {
 		return call(ctx, c, http.MethodDelete,
 			"/entities/"+url.PathEscape(a.ID)+"/attachments/"+url.PathEscape(a.AttachmentID), nil, nil)
 	})
+}
+
+// attachmentTypes are the values HomeBox accepts for an attachment's type.
+var attachmentTypes = map[string]bool{
+	"photo": true, "attachment": true, "manual": true, "receipt": true, "warranty": true,
+}
+
+type createAttachmentArgs struct {
+	ID         string `json:"id" jsonschema:"the entity UUID"`
+	Type       string `json:"type,omitempty" jsonschema:"photo (default), attachment, manual, receipt or warranty"`
+	Primary    bool   `json:"primary,omitempty" jsonschema:"make this the entity's primary photo"`
+	Name       string `json:"name,omitempty" jsonschema:"file name; defaults to the URL's last segment"`
+	URL        string `json:"url,omitempty" jsonschema:"https URL the server downloads (public hosts only, 10 MiB max)"`
+	DataBase64 string `json:"data_base64,omitempty" jsonschema:"the file itself, base64-encoded (10 MiB max); give this or url, not both"`
+}
+
+func addCreateAttachment(s *mcp.Server, c *homebox.Client, f *fetch.Fetcher) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "homebox_create_attachment",
+		Description: "Upload a file to an entity -- primarily a product photo. Give ONE source: url (https, public host, " +
+			"jpeg/png/webp/gif, 10 MiB max; the server downloads it) or data_base64. Type defaults to photo; " +
+			"set primary to make it the entity's main picture. Manuals, receipts and warranties may also be PDFs.",
+		Annotations: creates(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, a createAttachmentArgs) (*mcp.CallToolResult, any, error) {
+		if a.ID == "" {
+			return nil, nil, fmt.Errorf("id is required")
+		}
+
+		kind := a.Type
+		if kind == "" {
+			kind = "photo"
+		}
+
+		if !attachmentTypes[kind] {
+			return nil, nil, fmt.Errorf("type %q is not one of photo, attachment, manual, receipt, warranty", kind)
+		}
+
+		if (a.URL == "") == (a.DataBase64 == "") {
+			return nil, nil, fmt.Errorf("give exactly one of url or data_base64")
+		}
+
+		var (
+			file *fetch.File
+			err  error
+		)
+
+		if a.URL != "" {
+			file, err = f.Get(ctx, a.URL, kind)
+		} else {
+			file, err = fetch.Decode(a.DataBase64, kind)
+		}
+
+		if err != nil {
+			return nil, nil, err
+		}
+
+		name := fileName(a.Name, file)
+
+		out, err := c.Upload(ctx, "/entities/"+url.PathEscape(a.ID)+"/attachments", map[string]string{
+			"type":    kind,
+			"primary": strconv.FormatBool(a.Primary),
+			"name":    name,
+		}, name, file.ContentType, file.Data)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return nil, newAttachment(out, name, kind), nil
+	})
+}
+
+// fileName picks a safe name: the caller's, else the URL's, else a generic one
+// with the extension the sniffed type implies. Directory parts and control
+// characters are dropped -- the name ends up in a header and in HomeBox's UI.
+func fileName(given string, f *fetch.File) string {
+	n := given
+	if n == "" {
+		n = f.Name
+	}
+
+	n = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '"' {
+			return -1
+		}
+
+		return r
+	}, filepath.Base(strings.ReplaceAll(n, "\\", "/")))
+
+	if n == "" || n == "." || n == "/" {
+		exts := map[string]string{
+			"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+			"image/gif": ".gif", "application/pdf": ".pdf",
+		}
+		n = "upload" + exts[f.ContentType]
+	}
+
+	return n
+}
+
+// newAttachment finds the attachment just created in HomeBox's answer.
+//
+// The endpoint answers with the whole ENTITY, attachments included, not the
+// attachment alone. The new one is the last whose title and type match what
+// was sent; if the shape is not recognised the answer is returned untouched
+// rather than guessed at.
+func newAttachment(out any, name, kind string) any {
+	e, ok := out.(map[string]any)
+	if !ok {
+		return map[string]any{"items": out}
+	}
+
+	atts, _ := e["attachments"].([]any)
+
+	for i := len(atts) - 1; i >= 0; i-- {
+		at, ok := atts[i].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		if at["title"] == name && at["type"] == kind {
+			return map[string]any{
+				"id": at["id"], "type": at["type"], "primary": at["primary"], "title": at["title"],
+				"attachment": at,
+			}
+		}
+	}
+
+	return e
 }
 
 func addLookups(s *mcp.Server, c *homebox.Client) {

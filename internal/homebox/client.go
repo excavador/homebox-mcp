@@ -12,7 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
@@ -64,13 +67,23 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		rdr = bytes.NewReader(b)
 	}
 
+	ct := ""
+	if body != nil {
+		ct = "application/json"
+	}
+
+	return c.send(ctx, method, path, u, rdr, ct, out)
+}
+
+// send performs a prepared request and decodes the JSON answer, if any.
+func (c *Client) send(ctx context.Context, method, path, u string, rdr io.Reader, contentType string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
 	if err != nil {
 		return err
 	}
 
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 
 	// HomeBox's only auth scheme: its own bearer token. It does NOT accept
@@ -199,4 +212,43 @@ func (c *Client) Self(ctx context.Context) (name, email, group string, err error
 	}
 
 	return out.Item.Name, out.Item.Email, out.Item.DefaultGroupID, nil
+}
+
+// Upload POSTs a multipart form to path: the given text fields, then the file
+// as the "file" part with its own content type. HomeBox's attachment endpoint is multipart, so Call's
+// JSON body cannot reach it.
+func (c *Client) Upload(ctx context.Context, path string, fields map[string]string, filename, contentType string, data []byte) (any, error) {
+	var buf bytes.Buffer
+
+	mw := multipart.NewWriter(&buf)
+
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			return nil, fmt.Errorf("encode form: %w", err)
+		}
+	}
+
+	h := textproto.MIMEHeader{}
+	h.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "file", "filename": filename}))
+	h.Set("Content-Type", contentType)
+
+	fw, err := mw.CreatePart(h)
+	if err != nil {
+		return nil, fmt.Errorf("encode form: %w", err)
+	}
+
+	if _, err := fw.Write(data); err != nil {
+		return nil, fmt.Errorf("encode form: %w", err)
+	}
+
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("encode form: %w", err)
+	}
+
+	var out any
+	if err := c.send(ctx, http.MethodPost, path, c.baseURL+"/api/v1"+path, &buf, mw.FormDataContentType(), &out); err != nil {
+		return nil, err
+	}
+
+	return out, nil
 }

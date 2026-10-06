@@ -47,7 +47,7 @@ maintenance records and attachments all read, create, update and delete.
 | `homebox_entity_types` `homebox_create_entity_type` `homebox_update_entity_type` `homebox_delete_entity_type` | the types that distinguish an item from a location |
 | `homebox_list_templates` `homebox_get_template` `homebox_create_template` `homebox_update_template` `homebox_delete_template` `homebox_create_item_from_template` | templates |
 | `homebox_maintenance` `homebox_create_maintenance` `homebox_update_maintenance` `homebox_delete_maintenance` | maintenance records |
-| `homebox_get_attachment` `homebox_update_attachment` `homebox_delete_attachment` | attachments on an entity |
+| `homebox_get_attachment` `homebox_create_attachment` `homebox_update_attachment` `homebox_delete_attachment` | attachments on an entity; create uploads a product photo or file from an https URL or base64 (see below) |
 | `homebox_get_asset` `homebox_search_barcode` | look up by printed asset id or barcode |
 | `homebox_statistics` `homebox_bill_of_materials` `homebox_currencies` | totals, the CSV report, and the currency list |
 | `homebox_custom_fields` `homebox_custom_field_values` | custom field names, and the values in use |
@@ -56,6 +56,14 @@ maintenance records and attachments all read, create, update and delete.
 Every tool carries MCP annotations, so a client can tell a read from a delete
 without calling it: reads are `readOnlyHint`, creates are non-destructive, and
 updates and deletes are `destructiveHint`.
+
+`homebox_create_attachment` takes one source, `url` or `data_base64`, 10 MiB
+at most. A URL is fetched by the server, so it is held to public https: every
+resolved address must be public (private, loopback, link-local, CGNAT and
+multicast are refused, and the checked address is the one dialled), redirects
+are limited to three and to https, the download has 20 seconds, and the
+content type must be jpeg, png, webp or gif and match what the bytes sniff as.
+Manuals, receipts and warranties may also be PDFs.
 
 `/v1/entities` returns items only — locations are reachable through the tree.
 The tool descriptions say so, because a model picking a tool reads them: one

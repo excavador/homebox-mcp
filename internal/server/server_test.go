@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -514,5 +516,103 @@ func TestUpdateHonoursExplicitTags(t *testing.T) {
 
 	if len(h.tags) != 1 || h.tags[0] != "new" {
 		t.Errorf("tags = %v, want [new]", h.tags)
+	}
+}
+
+var testPNG = append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...)
+
+// HomeBox's attachment endpoint is multipart, and answers with the whole
+// entity. The tool must send file, type, primary and name, and hand back the
+// attachment it just made rather than the entity.
+func TestCreateAttachmentSendsMultipart(t *testing.T) {
+	var (
+		gotPath, gotAuth, gotCT string
+		form                    = map[string]string{}
+		file                    []byte
+		fileCT, fileName        string
+	)
+
+	cs := connect(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth, gotCT = r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type")
+
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("not multipart: %v", err)
+			return
+		}
+
+		for k, v := range r.MultipartForm.Value {
+			form[k] = v[0]
+		}
+
+		fh := r.MultipartForm.File["file"][0]
+		fileName, fileCT = fh.Filename, fh.Header.Get("Content-Type")
+		f, _ := fh.Open()
+		file, _ = io.ReadAll(f)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"e1","attachments":[` +
+			`{"id":"old","type":"photo","primary":true,"title":"old.png"},` +
+			`{"id":"a1","type":"photo","primary":true,"title":"front.png"}]}`))
+	}))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "homebox_create_attachment",
+		Arguments: map[string]any{
+			"id": "e1", "primary": true, "name": "../front.png",
+			"data_base64": base64.StdEncoding.EncodeToString(testPNG),
+		},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("call: %v %+v", err, res)
+	}
+
+	if gotPath != "/api/v1/entities/e1/attachments" {
+		t.Errorf("path = %s", gotPath)
+	}
+
+	if gotAuth != "Bearer t" || !strings.HasPrefix(gotCT, "multipart/form-data") {
+		t.Errorf("auth = %q, content-type = %q", gotAuth, gotCT)
+	}
+
+	if form["type"] != "photo" || form["primary"] != "true" || form["name"] != "front.png" {
+		t.Errorf("form = %v, want type=photo (the default), primary=true, a sanitised name", form)
+	}
+
+	if !bytes.Equal(file, testPNG) || fileName != "front.png" || fileCT != "image/png" {
+		t.Errorf("file part = %q %q %d bytes", fileName, fileCT, len(file))
+	}
+
+	out, _ := res.StructuredContent.(map[string]any)
+	if out["id"] != "a1" || out["type"] != "photo" || out["primary"] != true || out["title"] != "front.png" {
+		t.Errorf("result = %v, want the new attachment, not the entity", out)
+	}
+}
+
+func TestCreateAttachmentRefusesBadInput(t *testing.T) {
+	hits := 0
+	cs := connect(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	b64 := base64.StdEncoding.EncodeToString(testPNG)
+
+	for name, args := range map[string]map[string]any{
+		"no id":         {"data_base64": b64},
+		"no source":     {"id": "e1"},
+		"both sources":  {"id": "e1", "data_base64": b64, "url": "https://example.com/a.png"},
+		"unknown type":  {"id": "e1", "data_base64": b64, "type": "thumbnail"},
+		"http url":      {"id": "e1", "url": "http://example.com/a.png"},
+		"private url":   {"id": "e1", "url": "https://127.0.0.1/a.png"},
+		"not an image":  {"id": "e1", "data_base64": base64.StdEncoding.EncodeToString([]byte("<html>"))},
+		"pdf for photo": {"id": "e1", "data_base64": base64.StdEncoding.EncodeToString([]byte("%PDF-1.7 ...."))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "homebox_create_attachment", Arguments: args})
+			if err == nil && !res.IsError {
+				t.Fatal("want an error")
+			}
+		})
+	}
+
+	if hits != 0 {
+		t.Errorf("HomeBox was called %d times; a refused input must never reach it", hits)
 	}
 }
