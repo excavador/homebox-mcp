@@ -61,6 +61,11 @@ var blocked = mustPrefixes(
 	"198.51.100.0/24", // TEST-NET-2
 	"203.0.113.0/24",  // TEST-NET-3
 	"240.0.0.0/4",     // reserved, incl. broadcast
+	"::/96",           // IPv4-compatible ::a.b.c.d
+	"192.88.99.0/24",  // 6to4 relay anycast
+	"2002::/16",       // 6to4: embeds an IPv4 address
+	"2001::/32",       // Teredo
+	"fec0::/10",       // site-local, deprecated but still routed privately
 	"64:ff9b::/96",    // NAT64: embeds an IPv4 address we would have to re-check
 	"100::/64",        // discard-only
 	"2001:db8::/32",   // documentation
@@ -140,7 +145,7 @@ func (f *Fetcher) dialContext(ctx context.Context, network, addr string) (net.Co
 
 	for _, ip := range ips {
 		if Refused(ip) {
-			return nil, fmt.Errorf("refusing %s: resolves to %s, which is not a public address", host, ip.Unmap())
+			return nil, fmt.Errorf("refusing %s: not a public address", host)
 		}
 	}
 
@@ -268,6 +273,11 @@ func (f *Fetcher) Get(ctx context.Context, rawURL, kind string) (*File, error) {
 
 // Decode reads base64 content, applying the same size and type rules.
 func Decode(s, kind string) (*File, error) {
+	// Bound the raw string first: Fields and Join would copy all of it.
+	if len(s) > MaxBytes/3*4+4096 {
+		return nil, fmt.Errorf("data_base64: larger than the %d byte limit", MaxBytes)
+	}
+
 	s = strings.Join(strings.Fields(s), "")
 
 	if base64.StdEncoding.DecodedLen(len(s)) > MaxBytes+3 {

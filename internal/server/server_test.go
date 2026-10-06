@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/excavador/homebox-mcp/internal/fetch"
 	"github.com/excavador/homebox-mcp/internal/homebox"
 )
 
@@ -533,6 +535,13 @@ func TestCreateAttachmentSendsMultipart(t *testing.T) {
 	)
 
 	cs := connect(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"e1","attachments":[{"id":"old","type":"photo","title":"old.png"}]}`))
+
+			return
+		}
+
 		gotPath, gotAuth, gotCT = r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type")
 
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
@@ -614,5 +623,93 @@ func TestCreateAttachmentRefusesBadInput(t *testing.T) {
 
 	if hits != 0 {
 		t.Errorf("HomeBox was called %d times; a refused input must never reach it", hits)
+	}
+}
+
+// Titles are not unique, so the new attachment is the one id that was not
+// there before. Here the old and the new share a title and come back shuffled.
+func TestCreateAttachmentIdentifiesTheNewOneByID(t *testing.T) {
+	post := `{"id":"e1","attachments":[` +
+		`{"id":"new","type":"photo","primary":false,"title":"front.png"},` +
+		`{"id":"b","type":"photo","title":"front.png"},` +
+		`{"id":"a","type":"photo","title":"front.png"}]}`
+
+	run := func(t *testing.T, postBody string) map[string]any {
+		cs := connect(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"id":"e1","attachments":[` +
+					`{"id":"a","type":"photo","title":"front.png"},{"id":"b","type":"photo","title":"front.png"}]}`))
+
+				return
+			}
+
+			_, _ = w.Write([]byte(postBody))
+		}))
+
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "homebox_create_attachment",
+			Arguments: map[string]any{
+				"id": "e1", "name": "front.png",
+				"data_base64": base64.StdEncoding.EncodeToString(testPNG),
+			},
+		})
+		if err != nil || res.IsError {
+			t.Fatalf("call: %v %+v", err, res)
+		}
+
+		out, _ := res.StructuredContent.(map[string]any)
+
+		return out
+	}
+
+	if out := run(t, post); out["id"] != "new" {
+		t.Errorf("id = %v, want new -- title matching picked an old attachment", out["id"])
+	}
+
+	// Nothing new, or two new: do not guess.
+	for name, body := range map[string]string{
+		"none new": `{"id":"e1","attachments":[{"id":"a","title":"front.png"},{"id":"b","title":"front.png"}]}`,
+		"two new":  `{"id":"e1","attachments":[{"id":"a"},{"id":"b"},{"id":"n1"},{"id":"n2"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := run(t, body)
+			if _, ok := out["note"].(string); !ok || out["id"] != "e1" {
+				t.Errorf("out = %v, want the raw entity plus a note", out)
+			}
+		})
+	}
+}
+
+func TestFileName(t *testing.T) {
+	long := strings.Repeat("é", 200)
+
+	for name, tc := range map[string]struct{ given, ct, want string }{
+		"keeps matching ext":  {"front.png", "image/png", "front.png"},
+		"html becomes gif":    {"x.html", "image/gif", "x.gif"},
+		"svg becomes gif":     {"x.svg", "image/gif", "x.gif"},
+		"jpeg ext normalised": {"x.jpeg", "image/jpeg", "x.jpg"},
+		"no ext":              {"photo", "image/webp", "photo.webp"},
+		"pdf":                 {"manual.exe", "application/pdf", "manual.pdf"},
+		"empty":               {"", "image/png", "upload.png"},
+		"dotdot":              {"..", "image/png", "upload.png"},
+		"dotdot inside":       {"a..b.png", "image/png", "a.b.png"},
+		"directory":           {"../../etc/passwd", "image/png", "passwd.png"},
+		"backslash dir":       {`C:\\x\\y.png`, "image/png", "y.png"},
+		"control chars":       {"a\x00b\nc.png", "image/png", "abc.png"},
+		"bidi override":       {"cod\u202Egnp.exe", "image/png", "codgnp.png"},
+		"bidi isolate":        {"a\u2066b\u2069.png", "image/png", "ab.png"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := fileName(tc.given, &fetch.File{ContentType: tc.ct}); got != tc.want {
+				t.Errorf("fileName(%q) = %q, want %q", tc.given, got, tc.want)
+			}
+		})
+	}
+
+	got := fileName(long+".png", &fetch.File{ContentType: "image/png"})
+	if len(got) > 120 || !strings.HasSuffix(got, ".png") || !utf8.ValidString(got) {
+		t.Errorf("long name = %d bytes %q, want <=120, valid UTF-8, extension kept", len(got), got)
 	}
 }

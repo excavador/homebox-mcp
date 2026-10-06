@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/excavador/homebox-mcp/internal/fetch"
 	"github.com/excavador/homebox-mcp/internal/homebox"
@@ -458,6 +459,9 @@ var attachmentTypes = map[string]bool{
 	"photo": true, "attachment": true, "manual": true, "receipt": true, "warranty": true,
 }
 
+// uploadSlots caps concurrent downloads+uploads: each holds up to 10 MiB, twice.
+var uploadSlots = make(chan struct{}, 2)
+
 type createAttachmentArgs struct {
 	ID         string `json:"id" jsonschema:"the entity UUID"`
 	Type       string `json:"type,omitempty" jsonschema:"photo (default), attachment, manual, receipt or warranty"`
@@ -492,6 +496,14 @@ func addCreateAttachment(s *mcp.Server, c *homebox.Client, f *fetch.Fetcher) {
 			return nil, nil, fmt.Errorf("give exactly one of url or data_base64")
 		}
 
+		// Bound how many downloads and uploads run at once.
+		select {
+		case uploadSlots <- struct{}{}:
+			defer func() { <-uploadSlots }()
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+
 		var (
 			file *fetch.File
 			err  error
@@ -509,7 +521,18 @@ func addCreateAttachment(s *mcp.Server, c *homebox.Client, f *fetch.Fetcher) {
 
 		name := fileName(a.Name, file)
 
-		out, err := c.Upload(ctx, "/entities/"+url.PathEscape(a.ID)+"/attachments", map[string]string{
+		// The upload answers with the entity; ids from before are how the
+		// new attachment is told apart from ones with the same title.
+		path := "/entities/" + url.PathEscape(a.ID)
+
+		prior, err := c.Call(ctx, http.MethodGet, path, nil, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		before := attachmentIDs(prior)
+
+		out, err := c.Upload(ctx, path+"/attachments", map[string]string{
 			"type":    kind,
 			"primary": strconv.FormatBool(a.Primary),
 			"name":    name,
@@ -518,13 +541,23 @@ func addCreateAttachment(s *mcp.Server, c *homebox.Client, f *fetch.Fetcher) {
 			return nil, nil, err
 		}
 
-		return nil, newAttachment(out, name, kind), nil
+		return nil, newAttachment(out, before), nil
 	})
 }
 
-// fileName picks a safe name: the caller's, else the URL's, else a generic one
-// with the extension the sniffed type implies. Directory parts and control
-// characters are dropped -- the name ends up in a header and in HomeBox's UI.
+// extFor is the extension each accepted content type is stored under.
+var extFor = map[string]string{
+	"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+	"image/gif": ".gif", "application/pdf": ".pdf",
+}
+
+// maxNameBytes caps the stored name, extension included.
+const maxNameBytes = 120
+
+// fileName picks a safe name: the caller's, else the URL's, else a generic one.
+// Directory parts, control and bidi-override characters are dropped -- the name
+// ends up in a header and in HomeBox's UI -- and the extension is always the
+// one the SNIFFED type implies, so "x.html" holding a gif is stored as "x.gif".
 func fileName(given string, f *fetch.File) string {
 	n := given
 	if n == "" {
@@ -532,53 +565,91 @@ func fileName(given string, f *fetch.File) string {
 	}
 
 	n = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || r == '"' {
+		switch {
+		case unicode.IsControl(r), r == '"', r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069:
 			return -1
 		}
 
 		return r
 	}, filepath.Base(strings.ReplaceAll(n, "\\", "/")))
 
-	if n == "" || n == "." || n == "/" {
-		exts := map[string]string{
-			"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
-			"image/gif": ".gif", "application/pdf": ".pdf",
-		}
-		n = "upload" + exts[f.ContentType]
+	ext := extFor[f.ContentType]
+
+	// Drop whatever extension was given: if it names the right type it is
+	// re-added below, and if it names another one it must not survive.
+	if e := filepath.Ext(n); e != "" {
+		n = strings.TrimSuffix(n, e)
 	}
 
-	return n
+	n = strings.Trim(strings.ReplaceAll(n, "..", "."), ". ")
+	if n == "" {
+		n = "upload"
+	}
+
+	if limit := maxNameBytes - len(ext); len(n) > limit {
+		n = strings.ToValidUTF8(n[:limit], "")
+	}
+
+	return n + ext
 }
 
-// newAttachment finds the attachment just created in HomeBox's answer.
-//
-// The endpoint answers with the whole ENTITY, attachments included, not the
-// attachment alone. The new one is the last whose title and type match what
-// was sent; if the shape is not recognised the answer is returned untouched
-// rather than guessed at.
-func newAttachment(out any, name, kind string) any {
-	e, ok := out.(map[string]any)
-	if !ok {
-		return map[string]any{"items": out}
-	}
+// attachmentIDs lists the ids of an entity's attachments in HomeBox's answer.
+func attachmentIDs(out any) map[string]bool {
+	ids := map[string]bool{}
 
+	e, _ := out.(map[string]any)
 	atts, _ := e["attachments"].([]any)
 
-	for i := len(atts) - 1; i >= 0; i-- {
-		at, ok := atts[i].(map[string]any)
-		if !ok {
-			continue
-		}
-
-		if at["title"] == name && at["type"] == kind {
-			return map[string]any{
-				"id": at["id"], "type": at["type"], "primary": at["primary"], "title": at["title"],
-				"attachment": at,
+	for _, a := range atts {
+		if m, ok := a.(map[string]any); ok {
+			if id, ok := m["id"].(string); ok {
+				ids[id] = true
 			}
 		}
 	}
 
-	return e
+	return ids
+}
+
+// newAttachment finds the attachment the upload created.
+//
+// The endpoint answers with the whole ENTITY, not the attachment, and titles
+// are not unique, so the new one is the single id that was not there before
+// the upload. If there is not exactly one, the entity is returned untouched
+// with a note, rather than guessing which attachment is ours.
+func newAttachment(out any, before map[string]bool) any {
+	e, ok := out.(map[string]any)
+	if !ok {
+		return map[string]any{"items": out, "note": "unrecognised answer from HomeBox"}
+	}
+
+	atts, _ := e["attachments"].([]any)
+
+	var found []map[string]any
+
+	for _, a := range atts {
+		if m, ok := a.(map[string]any); ok {
+			if id, ok := m["id"].(string); ok && !before[id] {
+				found = append(found, m)
+			}
+		}
+	}
+
+	if len(found) != 1 {
+		res := map[string]any{"note": fmt.Sprintf("could not identify the new attachment (%d new ids); returning the whole entity", len(found))}
+		for k, v := range e {
+			res[k] = v
+		}
+
+		return res
+	}
+
+	at := found[0]
+
+	return map[string]any{
+		"id": at["id"], "type": at["type"], "primary": at["primary"], "title": at["title"],
+		"attachment": at,
+	}
 }
 
 func addLookups(s *mcp.Server, c *homebox.Client) {

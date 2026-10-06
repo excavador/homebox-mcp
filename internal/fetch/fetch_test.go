@@ -67,6 +67,7 @@ func TestRefusedAddresses(t *testing.T) {
 		"100.64.0.1", "100.127.255.255", "0.0.0.0", "224.0.0.1", "255.255.255.255",
 		"::1", "::", "fc00::1", "fd12:3456::1", "fe80::1", "ff02::1",
 		"::ffff:10.0.0.1", "::ffff:127.0.0.1", "64:ff9b::a00:1",
+		"fec0::1", "feff::1", "2002:a00:1::1", "2001:0:4136:e378::1", "::a00:1", "::808:808", "192.88.99.1",
 	} {
 		if !Refused(netip.MustParseAddr(s)) {
 			t.Errorf("%s must be refused", s)
@@ -112,6 +113,12 @@ func TestGetRefusesBeforeConnecting(t *testing.T) {
 			_, err := f.Get(context.Background(), tc.url, "photo")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+
+			for _, ip := range tc.ips {
+				if strings.Contains(err.Error(), strings.TrimPrefix(ip, "::ffff:")) {
+					t.Errorf("error %q leaks the resolved address %s", err, ip)
+				}
 			}
 
 			if len(*dialed) != 0 {
@@ -286,5 +293,13 @@ func TestDecode(t *testing.T) {
 		if _, err := Decode(in, "photo"); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
+	}
+}
+
+// The raw string is bounded before it is copied by Fields/Join.
+func TestDecodeBoundsTheRawStringFirst(t *testing.T) {
+	if _, err := Decode(strings.Repeat(" ", 3*MaxBytes), "photo"); err == nil ||
+		!strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("err = %v, want the size limit", err)
 	}
 }
