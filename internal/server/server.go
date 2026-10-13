@@ -70,8 +70,23 @@ type createArgs struct {
 	Body map[string]any `json:"body" jsonschema:"the object to create, in HomeBox's own shape"`
 }
 
+// Option adjusts what New registers.
+type Option func(*config)
+
+type config struct{ uploads *Uploader }
+
+// WithUploads adds homebox_prepare_attachment_upload, which hands out links
+// the caller PUTs a local file to. Only the http transport can serve them, so
+// a stdio server simply does not pass it.
+func WithUploads(u *Uploader) Option { return func(c *config) { c.uploads = u } }
+
 // New builds the MCP server and registers every tool.
-func New(c *homebox.Client, version string) *mcp.Server {
+func New(c *homebox.Client, version string, opts ...Option) *mcp.Server {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	s := mcp.NewServer(&mcp.Implementation{Name: "homebox", Version: version}, nil)
 
 	addEntities(s, c)
@@ -80,6 +95,11 @@ func New(c *homebox.Client, version string) *mcp.Server {
 	addTemplates(s, c)
 	addMaintenance(s, c)
 	addAttachments(s, c, fetch.New())
+
+	if cfg.uploads != nil {
+		cfg.uploads.addTool(s)
+	}
+
 	addLookups(s, c)
 	addConfiguration(s, c)
 
@@ -476,7 +496,8 @@ func addCreateAttachment(s *mcp.Server, c *homebox.Client, f *fetch.Fetcher) {
 		Name: "homebox_create_attachment",
 		Description: "Upload a file to an entity -- primarily a product photo. Give ONE source: url (https, public host, " +
 			"jpeg/png/webp/gif, 10 MiB max; the server downloads it) or data_base64. Type defaults to photo; " +
-			"set primary to make it the entity's main picture. Manuals, receipts and warranties may also be PDFs.",
+			"set primary to make it the entity's main picture. Manuals, receipts and warranties may also be PDFs. " +
+			"For a file on the caller's own machine, use homebox_prepare_attachment_upload instead of data_base64.",
 		Annotations: creates(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a createAttachmentArgs) (*mcp.CallToolResult, any, error) {
 		if a.ID == "" {
@@ -519,30 +540,40 @@ func addCreateAttachment(s *mcp.Server, c *homebox.Client, f *fetch.Fetcher) {
 			return nil, nil, err
 		}
 
-		name := fileName(a.Name, file)
-
-		// The upload answers with the entity; ids from before are how the
-		// new attachment is told apart from ones with the same title.
-		path := "/entities/" + url.PathEscape(a.ID)
-
-		prior, err := c.Call(ctx, http.MethodGet, path, nil, nil)
+		out, err := storeAttachment(ctx, c, a.ID, kind, a.Primary, fileName(a.Name, file), file)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		before := attachmentIDs(prior)
-
-		out, err := c.Upload(ctx, path+"/attachments", map[string]string{
-			"type":    kind,
-			"primary": strconv.FormatBool(a.Primary),
-			"name":    name,
-		}, name, file.ContentType, file.Data)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return nil, newAttachment(out, before), nil
+		return nil, out, nil
 	})
+}
+
+// storeAttachment uploads an already-checked file to an entity and returns
+// the attachment it created. Both ways in -- the tool and a one-time upload
+// link -- end here, so they cannot drift apart.
+func storeAttachment(ctx context.Context, c *homebox.Client, id, kind string, primary bool, name string, file *fetch.File) (any, error) {
+	// The upload answers with the entity; ids from before are how the new
+	// attachment is told apart from ones with the same title.
+	path := "/entities/" + url.PathEscape(id)
+
+	prior, err := c.Call(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	before := attachmentIDs(prior)
+
+	out, err := c.Upload(ctx, path+"/attachments", map[string]string{
+		"type":    kind,
+		"primary": strconv.FormatBool(primary),
+		"name":    name,
+	}, name, file.ContentType, file.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	return newAttachment(out, before), nil
 }
 
 // extFor is the extension each accepted content type is stored under.

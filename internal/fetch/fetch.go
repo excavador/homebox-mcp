@@ -301,6 +301,18 @@ func Decode(s, kind string) (*File, error) {
 	return &File{Data: data, ContentType: sniffed}, nil
 }
 
+// Inspect applies the type rules to bytes the caller already holds, for a
+// source that is neither a URL nor base64 (a body sent to an upload link).
+// The size limit is the caller's: it knows how much it was willing to read.
+func Inspect(data []byte, kind string) (*File, error) {
+	ct, err := check(data, kind)
+	if err != nil {
+		return nil, err
+	}
+
+	return &File{Data: data, ContentType: ct}, nil
+}
+
 // check sniffs the bytes -- the declared type is only a claim -- and returns
 // the real type if it is acceptable for kind.
 func check(data []byte, kind string) (string, error) {
