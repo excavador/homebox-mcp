@@ -47,7 +47,7 @@ maintenance records and attachments all read, create, update and delete.
 | `homebox_entity_types` `homebox_create_entity_type` `homebox_update_entity_type` `homebox_delete_entity_type` | the types that distinguish an item from a location |
 | `homebox_list_templates` `homebox_get_template` `homebox_create_template` `homebox_update_template` `homebox_delete_template` `homebox_create_item_from_template` | templates |
 | `homebox_maintenance` `homebox_create_maintenance` `homebox_update_maintenance` `homebox_delete_maintenance` | maintenance records |
-| `homebox_get_attachment` `homebox_create_attachment` `homebox_update_attachment` `homebox_delete_attachment` | attachments on an entity; create uploads a product photo or file from an https URL or base64 (see below) |
+| `homebox_get_attachment` `homebox_create_attachment` `homebox_prepare_attachment_upload` `homebox_update_attachment` `homebox_delete_attachment` | attachments on an entity; create uploads a product photo or file from an https URL or base64, and prepare hands out a one-time link for a file on the caller's own machine (see below) |
 | `homebox_get_asset` `homebox_search_barcode` | look up by printed asset id or barcode |
 | `homebox_statistics` `homebox_bill_of_materials` `homebox_currencies` | totals, the CSV report, and the currency list |
 | `homebox_custom_fields` `homebox_custom_field_values` | custom field names, and the values in use |
@@ -64,6 +64,33 @@ multicast are refused, and the checked address is the one dialled), redirects
 are limited to three and to https, the download has 20 seconds, and the
 content type must be jpeg, png, webp or gif and match what the bytes sniff as.
 Manuals, receipts and warranties may also be PDFs.
+
+**A file on the caller's own machine** is the case neither source fits: it is
+not at a public URL, and base64 pushes every byte through the model, which
+costs tokens and can corrupt the copy. Over the http transport,
+`homebox_prepare_attachment_upload` answers with a one-time link and a ready
+`curl`:
+
+    curl -sS -X PUT --data-binary @/path/to/file '<upload_url>'
+
+The body is the raw file and the answer is the new attachment. The link is
+good for one entity and one attachment type, and works once — but a refused
+file (wrong type, too big) does not use it up. The file is streamed on to
+HomeBox as it arrives, so the server's memory does not grow with its size. A
+stdio server has no URL to hand out, so it does not offer the tool. See
+[docs/architecture.md](docs/architecture.md) for why this endpoint takes no
+bearer token.
+
+| setting (flag / env / chart value) | default | |
+|---|---|---|
+| `--upload-max-bytes` / `UPLOAD_MAX_BYTES` / `upload.maxBytes` | 10 MiB | largest file a link accepts, up to 1 GiB. HomeBox has its own limit, `HBOX_WEB_MAX_UPLOAD_SIZE` (MiB, default 10): raise both together, or the refusal just moves |
+| `--upload-ttl` / `UPLOAD_TTL` / `upload.ttl` | 10m | how long a link stays valid, 1m to 24h |
+| `--upload-timeout` / `UPLOAD_TIMEOUT` / `upload.timeout` | 15m | how long one whole upload may take, 10s to 6h |
+| `--homebox-timeout` / `HOMEBOX_TIMEOUT` / `homebox.timeout` | 30s | deadline for an ordinary request to HomeBox; a streamed upload is bound by the upload timeout instead |
+
+Durations are Go durations (`90s`, `15m`, `1h`). A value out of range stops the
+server at startup, and the chart's schema refuses it at render time, rather
+than the setting quietly doing something else.
 
 `/v1/entities` returns items only — locations are reachable through the tree.
 The tool descriptions say so, because a model picking a tool reads them: one

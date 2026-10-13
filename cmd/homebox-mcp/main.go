@@ -24,6 +24,8 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -66,6 +68,14 @@ func main() {
 				Sources:  cli.EnvVars("HOMEBOX_TOKEN"),
 				Required: true,
 			},
+			&cli.DurationFlag{
+				Name: "homebox-timeout",
+				// Counts the whole request, body included. A streamed upload is
+				// bound by --upload-timeout instead.
+				Usage:   "deadline for an ordinary request to HomeBox",
+				Value:   homebox.DefaultTimeout,
+				Sources: cli.EnvVars("HOMEBOX_TIMEOUT"),
+			},
 			&cli.StringFlag{
 				Name:    "transport",
 				Usage:   "stdio or http",
@@ -103,6 +113,27 @@ func main() {
 				Value:   "openid",
 				Sources: cli.EnvVars("SCOPE"),
 			},
+			&cli.Int64Flag{
+				Name: "upload-max-bytes",
+				// HomeBox's own limit is HBOX_WEB_MAX_UPLOAD_SIZE (MiB, default
+				// 10). Raise both together, or the refusal moves to HomeBox.
+				Usage:   "largest file an upload link accepts (http transport only)",
+				Value:   server.DefaultMaxBytes,
+				Sources: cli.EnvVars("UPLOAD_MAX_BYTES"),
+			},
+			&cli.DurationFlag{
+				Name:    "upload-ttl",
+				Usage:   "how long an upload link stays valid (http transport only)",
+				Value:   10 * time.Minute,
+				Sources: cli.EnvVars("UPLOAD_TTL"),
+			},
+			&cli.DurationFlag{
+				Name: "upload-timeout",
+				// A hundred megabytes over a slow uplink takes minutes.
+				Usage:   "how long one whole upload may take, receiving and storing it (http transport only)",
+				Value:   server.DefaultUploadTimeout,
+				Sources: cli.EnvVars("UPLOAD_TIMEOUT"),
+			},
 		},
 		Action: run,
 	}
@@ -116,7 +147,8 @@ func main() {
 func run(ctx context.Context, c *cli.Command) error {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
-	client := homebox.New(c.String("homebox-url"), c.String("homebox-token"))
+	client := homebox.New(c.String("homebox-url"), c.String("homebox-token"),
+		homebox.WithTimeout(c.Duration("homebox-timeout")))
 
 	// Fail at startup rather than on the first tool call. A bad token here
 	// otherwise surfaces to a user as an unexplained tool error, one layer
@@ -129,10 +161,8 @@ func run(ctx context.Context, c *cli.Command) error {
 	log.Info("authenticated to homebox",
 		"user", name, "email", email, "group", group, "version", version)
 
-	s := server.New(client, version)
-
 	if c.String("transport") == "stdio" {
-		return s.Run(ctx, &mcp.StdioTransport{})
+		return server.New(client, version).Run(ctx, &mcp.StdioTransport{})
 	}
 
 	issuerURL := c.String("issuer-url")
@@ -150,10 +180,33 @@ func run(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("auth: %w", err)
 	}
 
+	// Upload links are signed with a key derived from the HomeBox API key, so
+	// there is no second secret to provision or rotate. The key is derived,
+	// not the token itself: the signature must not be an oracle for it.
+	keyMAC := hmac.New(sha256.New, []byte(c.String("homebox-token")))
+	keyMAC.Write([]byte("homebox-mcp/upload-link/v1"))
+
+	uploads, err := server.NewUploader(client, server.UploadConfig{
+		BaseURL:  resourceURL,
+		Key:      keyMAC.Sum(nil),
+		MaxBytes: c.Int64("upload-max-bytes"),
+		TTL:      c.Duration("upload-ttl"),
+		Timeout:  c.Duration("upload-timeout"),
+	})
+	if err != nil {
+		return err
+	}
+
+	s := server.New(client, version, server.WithUploads(uploads))
+
 	handler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return s }, nil)
 
 	mux := http.NewServeMux()
+	// The upload endpoint is reachable WITHOUT a bearer token on purpose: the
+	// caller is a curl in a shell, and the signed link is the credential. Its
+	// pattern is more specific than "/mcp/", so only a PUT to it comes here.
+	uploads.Mount(mux, "/mcp")
 	mux.Handle("/mcp", auth.Protect(handler))
 	mux.Handle("/mcp/", auth.Protect(handler))
 	// RFC 9728 puts the resource's own path after the well-known prefix. The

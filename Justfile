@@ -58,7 +58,28 @@ chart:
         --set homebox.existingSecret=x {{auth_values}} --set auth.scope=openid+mcp \
       | grep -A1 'name: SCOPE' | grep -q '"openid+mcp"' \
       || (echo "FAIL: auth.scope did not override SCOPE"; exit 1)
-    @echo "chart ok: renders, refuses missing values (including auth), a /api url and unknown keys, annotates the Deployment, and wires auth.scope"
+    @# upload settings reach the container, and a large byte count must not
+    @# render as 1.048576e+08 -- Helm reads numbers from a values file as floats.
+    @helm template t charts/homebox-mcp --set homebox.url=http://homebox \
+        --set homebox.existingSecret=x {{auth_values}} \
+        --set upload.maxBytes=104857600 --set upload.ttl=20m --set upload.timeout=1h --set homebox.timeout=45s \
+      | tr -d '\n' | grep -q 'UPLOAD_MAX_BYTES *value: "104857600"' \
+      || (echo "FAIL: upload.maxBytes did not reach UPLOAD_MAX_BYTES as an integer"; exit 1)
+    @helm template t charts/homebox-mcp --set homebox.url=http://homebox \
+        --set homebox.existingSecret=x {{auth_values}} --set upload.ttl=20m --set upload.timeout=1h --set homebox.timeout=45s \
+      | tr -d '\n' | grep -q 'UPLOAD_TTL *value: "20m".*UPLOAD_TIMEOUT *value: "1h"' \
+      || (echo "FAIL: upload.ttl / upload.timeout did not reach the container"; exit 1)
+    @# nonsense settings are refused at render time, not at pod start
+    @! helm template t charts/homebox-mcp --set homebox.url=http://homebox \
+        --set homebox.existingSecret=x {{auth_values}} --set upload.maxBytes=0 >/dev/null 2>&1 \
+        || (echo "FAIL: accepted upload.maxBytes=0"; exit 1)
+    @! helm template t charts/homebox-mcp --set homebox.url=http://homebox \
+        --set homebox.existingSecret=x {{auth_values}} --set upload.timeout=soon >/dev/null 2>&1 \
+        || (echo "FAIL: accepted upload.timeout=soon"; exit 1)
+    @! helm template t charts/homebox-mcp --set homebox.url=http://homebox \
+        --set homebox.existingSecret=x {{auth_values}} --set upload.maxBytes=5368709120 >/dev/null 2>&1 \
+        || (echo "FAIL: accepted an upload.maxBytes over 1 GiB"; exit 1)
+    @echo "chart ok: renders, refuses missing values (including auth), a /api url and unknown keys, annotates the Deployment, wires auth.scope, and passes and checks the upload settings"
 
 # Run against a HomeBox instance over stdio (the default transport).
 run url token:

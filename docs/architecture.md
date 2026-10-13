@@ -146,6 +146,45 @@ These were all found by loading a real inventory through the tools and then
 checking the result, not by reading the API docs. Each is covered by a test
 that drives the registered tool against a stub reproducing the quirk.
 
+### The upload link is the one request that carries no bearer token
+
+A file on the caller's machine cannot reach a server in a cluster through a
+tool call without passing through the model. So `homebox_prepare_attachment_upload`
+returns a link, and a `curl` in a shell sends the file straight to the server.
+A shell has no access to the MCP session's bearer token, so the link itself is
+the credential, and everything is done to make it worth little:
+
+- **Signed, stateless.** An HMAC over the claims, keyed from a value derived
+  from the HomeBox API key (not the key itself). The server keeps no list of
+  links, so a restart or a second replica does not lose any.
+- **Narrow.** One entity, one attachment type, one size cap, ten minutes.
+  Editing a claim breaks the signature; every failure answers the same
+  "invalid or expired" so a probe learns nothing about why.
+- **Used once, but only when it worked.** The nonce is reserved when a PUT
+  arrives, so two in parallel cannot both store a file, and released when the
+  upload fails, so sending the wrong file does not cost the caller the link.
+  The record is in memory and per replica; with several replicas a link could
+  be replayed once on each, inside its ten minutes, to the same entity.
+- **Checked like any other upload.** The type is sniffed from the first bytes,
+  the declared type is not trusted, the extension is forced to the sniffed
+  type, and the same concurrency cap applies. The size limit is enforced
+  while reading, not from the declared length, which a sender can omit or lie
+  about.
+- **Streamed, so memory is flat.** Only the first 512 bytes are held; the rest
+  goes through a pipe into the multipart request to HomeBox. Buffering a file
+  twice, as the 10 MiB tool paths do, would need 200 MiB for a 100 MiB upload
+  in a pod limited to 128 MiB. The whole upload has one deadline
+  (`UPLOAD_TIMEOUT`), set on the read side too, so a sender that trickles
+  bytes cannot hold a slot; the ordinary 30-second HomeBox timeout does not
+  apply to it, because it counts the body.
+
+The route is `PUT /mcp/upload/{token}`. Go's mux prefers it over the
+catch-all `/mcp/` that sits behind the token check, so it needs no gateway
+rule, and every other method and path still goes through the check. A test
+builds the same mux, because a pattern conflict panics at startup, not at
+build time. What a leaked link allows is one attachment on one entity within
+ten minutes; it reads nothing and deletes nothing.
+
 ### The excluded endpoints are a safety boundary, not an oversight
 
 `/actions/*` (including `wipe-inventory`), authentication and API-key

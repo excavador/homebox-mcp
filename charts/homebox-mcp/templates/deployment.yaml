@@ -32,6 +32,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.homebox.existingSecret }}
                   key: {{ .Values.homebox.existingSecretTokenKey }}
+            - name: HOMEBOX_TIMEOUT
+              value: {{ .Values.homebox.timeout | quote }}
+            - name: UPLOAD_MAX_BYTES
+              value: {{ printf "%d" (int64 .Values.upload.maxBytes) | quote }}
+            - name: UPLOAD_TTL
+              value: {{ .Values.upload.ttl | quote }}
+            - name: UPLOAD_TIMEOUT
+              value: {{ .Values.upload.timeout | quote }}
             # stdio would exit immediately in a pod with no attached client.
             - name: TRANSPORT
               value: http

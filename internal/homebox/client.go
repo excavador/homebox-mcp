@@ -41,11 +41,33 @@ type Client struct {
 // The API lives under /api — swagger reports basePath "/api" and the paths
 // themselves carry HomeBox's own /v1 version segment, so a full URL looks
 // like http://homebox/api/v1/entities.
-func New(baseURL, token string) *Client {
-	return &Client{
+func New(baseURL, token string, opts ...Option) *Client {
+	c := &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: DefaultTimeout},
+	}
+
+	for _, o := range opts {
+		o(c)
+	}
+
+	return c
+}
+
+// DefaultTimeout bounds an ordinary request, body included.
+const DefaultTimeout = 30 * time.Second
+
+// Option adjusts a Client.
+type Option func(*Client)
+
+// WithTimeout sets the deadline for an ordinary request. Zero or negative
+// keeps the default. A streamed upload is not bound by it -- see UploadReader.
+func WithTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		if d > 0 {
+			c.http.Timeout = d
+		}
 	}
 }
 
@@ -222,9 +244,54 @@ func (c *Client) Upload(ctx context.Context, path string, fields map[string]stri
 
 	mw := multipart.NewWriter(&buf)
 
+	if err := writeForm(mw, fields, filename, contentType, bytes.NewReader(data)); err != nil {
+		return nil, err
+	}
+
+	var out any
+	if err := c.send(ctx, http.MethodPost, path, c.baseURL+"/api/v1"+path, &buf, mw.FormDataContentType(), &out); err != nil {
+		return nil, err
+	}
+
+	return out, nil
+}
+
+// UploadReader is Upload for a file too large to hold: the form is written
+// into a pipe as the request reads it, so memory stays flat whatever the
+// size. An error from r (the caller's size limit, a dropped connection)
+// aborts the request and comes back wrapped, so errors.As still finds it.
+//
+// The ordinary request timeout does not apply: it counts the whole body, and
+// a slow sender would trip it on a file HomeBox is happy to receive. The
+// caller bounds the upload with ctx instead.
+func (c *Client) UploadReader(ctx context.Context, path string, fields map[string]string, filename, contentType string, r io.Reader) (any, error) {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+
+	go func() { pw.CloseWithError(writeForm(mw, fields, filename, contentType, r)) }()
+
+	long := *c
+	long.http = &http.Client{Transport: c.http.Transport}
+
+	var out any
+
+	err := long.send(ctx, http.MethodPost, path, c.baseURL+"/api/v1"+path, pr, mw.FormDataContentType(), &out)
+
+	// If send gave up early the writer is blocked on the pipe; this frees it.
+	_ = pr.Close()
+
+	if err != nil {
+		return nil, err
+	}
+
+	return out, nil
+}
+
+// writeForm writes the text fields, then r as the "file" part, then closes mw.
+func writeForm(mw *multipart.Writer, fields map[string]string, filename, contentType string, r io.Reader) error {
 	for k, v := range fields {
 		if err := mw.WriteField(k, v); err != nil {
-			return nil, fmt.Errorf("encode form: %w", err)
+			return fmt.Errorf("encode form: %w", err)
 		}
 	}
 
@@ -234,21 +301,16 @@ func (c *Client) Upload(ctx context.Context, path string, fields map[string]stri
 
 	fw, err := mw.CreatePart(h)
 	if err != nil {
-		return nil, fmt.Errorf("encode form: %w", err)
+		return fmt.Errorf("encode form: %w", err)
 	}
 
-	if _, err := fw.Write(data); err != nil {
-		return nil, fmt.Errorf("encode form: %w", err)
+	if _, err := io.Copy(fw, r); err != nil {
+		return fmt.Errorf("encode form: %w", err)
 	}
 
 	if err := mw.Close(); err != nil {
-		return nil, fmt.Errorf("encode form: %w", err)
+		return fmt.Errorf("encode form: %w", err)
 	}
 
-	var out any
-	if err := c.send(ctx, http.MethodPost, path, c.baseURL+"/api/v1"+path, &buf, mw.FormDataContentType(), &out); err != nil {
-		return nil, err
-	}
-
-	return out, nil
+	return nil
 }
