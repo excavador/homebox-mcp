@@ -23,6 +23,7 @@ var testPDF = []byte("%PDF-1.7\n%test manual\n")
 // HomeBox does, and records what reached it.
 type stubHomebox struct {
 	mu    sync.Mutex
+	delay time.Duration
 	posts int
 	form  map[string]string
 	file  []byte
@@ -49,9 +50,18 @@ func (s *stubHomebox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.posts++
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
 
-	_ = r.ParseMultipartForm(1 << 20)
+	// A request that was cut off mid-body does not parse, and must not count
+	// as a stored upload.
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	s.posts++
 
 	s.form = map[string]string{}
 	for k, v := range r.MultipartForm.Value {
@@ -351,5 +361,96 @@ func TestNewUploaderRejectsWeakConfig(t *testing.T) {
 
 	if _, err := NewUploader(c, UploadConfig{BaseURL: "https://x", Key: []byte("short")}); err == nil {
 		t.Error("a short key must be refused")
+	}
+}
+
+// The file is streamed to HomeBox as it arrives. A file of several megabytes
+// must arrive whole, in order, and without the server holding it.
+func TestUploadStreamsALargeFile(t *testing.T) {
+	f := newFixture(t, 0)
+
+	big := append([]byte("%PDF-1.7\n"), bytes.Repeat([]byte("0123456789abcdef"), 5<<16)...) // 5 MiB
+
+	rec := f.put("/upload/"+f.link(t, "manual", false)+"?name=big.pdf", big)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+
+	if !bytes.Equal(f.hb.file, big) || f.hb.ct != "application/pdf" || f.hb.name != "big.pdf" {
+		t.Errorf("HomeBox got %q %q, %d bytes; want the same %d bytes", f.hb.name, f.hb.ct, len(f.hb.file), len(big))
+	}
+}
+
+// The limit is enforced while reading, not from the declared length: a sender
+// may declare nothing, or lie. Nothing is stored, and the link is not spent.
+func TestStreamOverTheLimitStoresNothingAndKeepsTheLink(t *testing.T) {
+	f := newFixture(t, 1<<20)
+	tok := f.link(t, "photo", false)
+
+	big := append(append([]byte{}, testPNG...), make([]byte, 3<<20)...)
+
+	// No ContentLength: the up-front check cannot catch this one.
+	req := httptest.NewRequest(http.MethodPut, "/upload/"+tok, io.NopCloser(bytes.NewReader(big)))
+	req.ContentLength = -1
+
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (%s)", rec.Code, rec.Body)
+	}
+
+	if f.hb.posts != 0 {
+		t.Errorf("HomeBox stored %d uploads of a file over the limit", f.hb.posts)
+	}
+
+	if rec := f.put("/upload/"+tok, testPNG); rec.Code != http.StatusCreated {
+		t.Errorf("a refused upload must not use the link up: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestUploadTimeoutIsEnforced(t *testing.T) {
+	f := newFixture(t, 0)
+	f.up.timeout = 50 * time.Millisecond
+	f.hb.delay = 500 * time.Millisecond
+
+	rec := f.put("/upload/"+f.link(t, "photo", false), testPNG)
+	if rec.Code != http.StatusRequestTimeout {
+		t.Errorf("status = %d, want 408 (%s)", rec.Code, rec.Body)
+	}
+}
+
+func TestUploadSettingsAreChecked(t *testing.T) {
+	c := homebox.New("http://x", "t")
+	base := UploadConfig{BaseURL: "https://x", Key: []byte("0123456789abcdef0123456789abcdef")}
+
+	if _, err := NewUploader(c, base); err != nil {
+		t.Fatalf("all defaults must be accepted: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*UploadConfig){
+		"negative size":   func(c *UploadConfig) { c.MaxBytes = -1 },
+		"absurd size":     func(c *UploadConfig) { c.MaxBytes = 1 << 40 },
+		"ttl too short":   func(c *UploadConfig) { c.TTL = time.Second },
+		"ttl too long":    func(c *UploadConfig) { c.TTL = 72 * time.Hour },
+		"timeout tiny":    func(c *UploadConfig) { c.Timeout = time.Millisecond },
+		"timeout endless": func(c *UploadConfig) { c.Timeout = 48 * time.Hour },
+		"negative ttl":    func(c *UploadConfig) { c.TTL = -time.Minute },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := base
+			mutate(&cfg)
+
+			if _, err := NewUploader(c, cfg); err == nil {
+				t.Error("want an error")
+			}
+		})
+	}
+
+	ok := base
+	ok.MaxBytes, ok.TTL, ok.Timeout = 100<<20, 30*time.Minute, time.Hour
+
+	if _, err := NewUploader(c, ok); err != nil {
+		t.Errorf("100 MiB, 30m, 1h must be accepted: %v", err)
 	}
 }

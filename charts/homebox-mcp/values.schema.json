@@ -74,6 +74,11 @@
         "existingSecretTokenKey": {
           "type": "string",
           "minLength": 1
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$",
+          "description": "Deadline for an ordinary request to HomeBox, body included. A Go duration such as 30s."
         }
       }
     },
@@ -149,6 +154,28 @@
       "description": "Annotations on the Deployment itself. Reloader reads them here, not on the pod template.",
       "additionalProperties": {
         "type": "string"
+      }
+    },
+    "upload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824,
+          "description": "Largest file an upload link accepts, in bytes. Raise HomeBox's HBOX_WEB_MAX_UPLOAD_SIZE (MiB) with it."
+        },
+        "ttl": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$",
+          "description": "How long a link stays valid, 1m to 24h."
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$",
+          "description": "How long one whole upload may take, 10s to 6h."
+        }
       }
     }
   }

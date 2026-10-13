@@ -15,6 +15,9 @@ homebox:
   # values file, in git, and in `helm get values` output.
   existingSecret: ""
   existingSecretTokenKey: token
+  # Deadline for an ordinary request to HomeBox, body included (a Go
+  # duration). A streamed upload is bound by upload.timeout instead.
+  timeout: 30s
 
 # stdio is meaningless in a pod, so this chart only ever runs http.
 service:
@@ -38,6 +41,19 @@ auth:
   # an authorize request with no scope at all; "openid" is the one it
   # accepts by default. An estate needing more sets this, not the image.
   scope: openid
+
+# homebox_prepare_attachment_upload: one-time links a caller PUTs a local file
+# to. The file is streamed to HomeBox, so memory does not grow with its size.
+upload:
+  # Largest file a link accepts, in bytes. HomeBox has its own limit
+  # (HBOX_WEB_MAX_UPLOAD_SIZE, in MiB, default 10): raise both together, or the
+  # refusal just moves to HomeBox. Default is HomeBox's own 10 MiB.
+  maxBytes: 10485760
+  # How long a link stays valid (a Go duration, 1m to 24h).
+  ttl: 10m
+  # How long one whole upload may take, receiving and storing it (10s to 6h).
+  # A hundred megabytes over a slow uplink takes minutes.
+  timeout: 15m
 
 resources:
   requests: {cpu: 20m, memory: 64Mi}

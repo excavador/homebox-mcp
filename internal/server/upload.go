@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +41,10 @@ import (
 const (
 	defaultTTL = 10 * time.Minute
 
+	// DefaultUploadTimeout bounds one whole upload. A hundred megabytes over a
+	// slow uplink takes minutes, so this is generous; it is a setting.
+	DefaultUploadTimeout = 15 * time.Minute
+
 	// DefaultMaxBytes is HomeBox's own default upload limit. Raising ours
 	// above HomeBox's (HBOX_WEB_MAX_UPLOAD_SIZE, in MiB) only moves the
 	// refusal to a worse place.
@@ -58,17 +64,20 @@ type UploadConfig struct {
 	Key      []byte
 	MaxBytes int64
 	TTL      time.Duration
-	Now      func() time.Time
+	// Timeout bounds one whole upload, receiving and storing it. Default 15m.
+	Timeout time.Duration
+	Now     func() time.Time
 }
 
 // Uploader mints upload links and serves them.
 type Uploader struct {
-	c    *homebox.Client
-	base string
-	key  []byte
-	max  int64
-	ttl  time.Duration
-	now  func() time.Time
+	c       *homebox.Client
+	base    string
+	key     []byte
+	max     int64
+	ttl     time.Duration
+	timeout time.Duration
+	now     func() time.Time
 
 	mu       sync.Mutex
 	inflight map[string]time.Time // nonce -> expiry; present while used or being used
@@ -86,16 +95,15 @@ func NewUploader(c *homebox.Client, cfg UploadConfig) (*Uploader, error) {
 	}
 
 	u := &Uploader{
-		c: c, base: base, key: cfg.Key, max: cfg.MaxBytes, ttl: cfg.TTL, now: cfg.Now,
+		c: c, base: base, key: cfg.Key, max: cfg.MaxBytes, ttl: cfg.TTL, timeout: cfg.Timeout, now: cfg.Now,
 		inflight: map[string]time.Time{},
 	}
 
-	if u.max <= 0 {
-		u.max = DefaultMaxBytes
-	}
-
-	if u.ttl <= 0 {
-		u.ttl = defaultTTL
+	// Zero means "the default"; anything else must be sensible, because a
+	// setting that silently does something else is worse than a refusal at
+	// startup.
+	if err := u.defaultAndCheck(); err != nil {
+		return nil, err
 	}
 
 	if u.now == nil {
@@ -103,6 +111,37 @@ func NewUploader(c *homebox.Client, cfg UploadConfig) (*Uploader, error) {
 	}
 
 	return u, nil
+}
+
+const (
+	maxUploadBytes         = 1 << 30
+	minTTL, maxTTL         = time.Minute, 24 * time.Hour
+	minTimeout, maxTimeout = 10 * time.Second, 6 * time.Hour
+)
+
+func (u *Uploader) defaultAndCheck() error {
+	if u.max == 0 {
+		u.max = DefaultMaxBytes
+	}
+
+	if u.ttl == 0 {
+		u.ttl = defaultTTL
+	}
+
+	if u.timeout == 0 {
+		u.timeout = DefaultUploadTimeout
+	}
+
+	switch {
+	case u.max < 1 || u.max > maxUploadBytes:
+		return fmt.Errorf("upload: max bytes %d is outside 1..%d", u.max, int64(maxUploadBytes))
+	case u.ttl < minTTL || u.ttl > maxTTL:
+		return fmt.Errorf("upload: link ttl %s is outside %s..%s", u.ttl, minTTL, maxTTL)
+	case u.timeout < minTimeout || u.timeout > maxTimeout:
+		return fmt.Errorf("upload: timeout %s is outside %s..%s", u.timeout, minTimeout, maxTimeout)
+	}
+
+	return nil
 }
 
 // claims is everything a link authorises. Short keys keep the URL short.
@@ -300,7 +339,7 @@ func (u *Uploader) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bound how many uploads run at once; each holds the file twice.
+	// Bound how many uploads run at once.
 	select {
 	case uploadSlots <- struct{}{}:
 		defer func() { <-uploadSlots }()
@@ -309,19 +348,30 @@ func (u *Uploader) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, cl.Max))
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			reply(w, http.StatusRequestEntityTooLarge, map[string]any{"error": fmt.Sprintf("larger than the %d byte limit", cl.Max)})
-		} else {
-			reply(w, http.StatusBadRequest, map[string]any{"error": "could not read the body"})
-		}
+	// The whole upload -- receiving it and storing it -- has one deadline. The
+	// read side is bounded too, or a sender that trickles bytes would hold a
+	// slot for as long as it liked.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(u.timeout))
 
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), u.timeout)
+	defer cancel()
+
+	body := http.MaxBytesReader(w, r.Body, cl.Max)
+
+	// The type is decided from the first bytes (the sniffer reads at most
+	// 512), so only the head is held; the rest is streamed on to HomeBox and
+	// memory does not grow with the file.
+	head := make([]byte, 512)
+
+	n, err := io.ReadFull(body, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		refuseRead(w, err, cl.Max)
 		return
 	}
 
-	file, err := fetch.Inspect(data, cl.Kind)
+	head = head[:n]
+
+	file, err := fetch.Inspect(head, cl.Kind)
 	if err != nil {
 		reply(w, http.StatusUnsupportedMediaType, map[string]any{"error": err.Error()})
 		return
@@ -332,9 +382,17 @@ func (u *Uploader) handle(w http.ResponseWriter, r *http.Request) {
 		name = r.URL.Query().Get("name")
 	}
 
-	out, err := storeAttachment(context.WithoutCancel(r.Context()), u.c, cl.Entity, cl.Kind, cl.Primary, fileName(name, file), file)
+	out, err := storeStream(ctx, u.c, cl.Entity, cl.Kind, cl.Primary, fileName(name, file), file.ContentType,
+		io.MultiReader(bytes.NewReader(head), body))
 	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) || errors.Is(err, context.DeadlineExceeded) {
+			refuseRead(w, err, cl.Max)
+			return
+		}
+
 		reply(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+
 		return
 	}
 
@@ -347,4 +405,19 @@ func reply(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// refuseRead answers a body that could not be read to the end: over the
+// limit, out of time, or a broken connection.
+func refuseRead(w http.ResponseWriter, err error, max int64) {
+	var tooBig *http.MaxBytesError
+
+	switch {
+	case errors.As(err, &tooBig):
+		reply(w, http.StatusRequestEntityTooLarge, map[string]any{"error": fmt.Sprintf("larger than the %d byte limit", max)})
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		reply(w, http.StatusRequestTimeout, map[string]any{"error": "the upload took longer than the configured timeout"})
+	default:
+		reply(w, http.StatusBadRequest, map[string]any{"error": "could not read the body"})
+	}
 }

@@ -68,6 +68,14 @@ func main() {
 				Sources:  cli.EnvVars("HOMEBOX_TOKEN"),
 				Required: true,
 			},
+			&cli.DurationFlag{
+				Name: "homebox-timeout",
+				// Counts the whole request, body included. A streamed upload is
+				// bound by --upload-timeout instead.
+				Usage:   "deadline for an ordinary request to HomeBox",
+				Value:   homebox.DefaultTimeout,
+				Sources: cli.EnvVars("HOMEBOX_TIMEOUT"),
+			},
 			&cli.StringFlag{
 				Name:    "transport",
 				Usage:   "stdio or http",
@@ -119,6 +127,13 @@ func main() {
 				Value:   10 * time.Minute,
 				Sources: cli.EnvVars("UPLOAD_TTL"),
 			},
+			&cli.DurationFlag{
+				Name: "upload-timeout",
+				// A hundred megabytes over a slow uplink takes minutes.
+				Usage:   "how long one whole upload may take, receiving and storing it (http transport only)",
+				Value:   server.DefaultUploadTimeout,
+				Sources: cli.EnvVars("UPLOAD_TIMEOUT"),
+			},
 		},
 		Action: run,
 	}
@@ -132,7 +147,8 @@ func main() {
 func run(ctx context.Context, c *cli.Command) error {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
-	client := homebox.New(c.String("homebox-url"), c.String("homebox-token"))
+	client := homebox.New(c.String("homebox-url"), c.String("homebox-token"),
+		homebox.WithTimeout(c.Duration("homebox-timeout")))
 
 	// Fail at startup rather than on the first tool call. A bad token here
 	// otherwise surfaces to a user as an unexplained tool error, one layer
@@ -175,6 +191,7 @@ func run(ctx context.Context, c *cli.Command) error {
 		Key:      keyMAC.Sum(nil),
 		MaxBytes: c.Int64("upload-max-bytes"),
 		TTL:      c.Duration("upload-ttl"),
+		Timeout:  c.Duration("upload-timeout"),
 	})
 	if err != nil {
 		return err

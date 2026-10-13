@@ -23,6 +23,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -553,6 +554,22 @@ func addCreateAttachment(s *mcp.Server, c *homebox.Client, f *fetch.Fetcher) {
 // the attachment it created. Both ways in -- the tool and a one-time upload
 // link -- end here, so they cannot drift apart.
 func storeAttachment(ctx context.Context, c *homebox.Client, id, kind string, primary bool, name string, file *fetch.File) (any, error) {
+	return storeWith(ctx, c, id, kind, primary, name, func(path string, fields map[string]string) (any, error) {
+		return c.Upload(ctx, path, fields, name, file.ContentType, file.Data)
+	})
+}
+
+// storeStream is storeAttachment for a file read from r as it is sent, for
+// the sizes an upload link allows -- far more than the tool paths hold.
+func storeStream(ctx context.Context, c *homebox.Client, id, kind string, primary bool, name, contentType string, r io.Reader) (any, error) {
+	return storeWith(ctx, c, id, kind, primary, name, func(path string, fields map[string]string) (any, error) {
+		return c.UploadReader(ctx, path, fields, name, contentType, r)
+	})
+}
+
+func storeWith(ctx context.Context, c *homebox.Client, id, kind string, primary bool, name string,
+	upload func(path string, fields map[string]string) (any, error),
+) (any, error) {
 	// The upload answers with the entity; ids from before are how the new
 	// attachment is told apart from ones with the same title.
 	path := "/entities/" + url.PathEscape(id)
@@ -564,11 +581,11 @@ func storeAttachment(ctx context.Context, c *homebox.Client, id, kind string, pr
 
 	before := attachmentIDs(prior)
 
-	out, err := c.Upload(ctx, path+"/attachments", map[string]string{
+	out, err := upload(path+"/attachments", map[string]string{
 		"type":    kind,
 		"primary": strconv.FormatBool(primary),
 		"name":    name,
-	}, name, file.ContentType, file.Data)
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -74,13 +74,23 @@ costs tokens and can corrupt the copy. Over the http transport,
     curl -sS -X PUT --data-binary @/path/to/file '<upload_url>'
 
 The body is the raw file and the answer is the new attachment. The link is
-good for ten minutes (`UPLOAD_TTL`), for one entity and one attachment type,
-up to `UPLOAD_MAX_BYTES` (default 10 MiB, which is HomeBox's own default —
-raise `HBOX_WEB_MAX_UPLOAD_SIZE` with it, or the refusal just moves). It works
-once, but a refused file (wrong type, too big) does not use it up. A stdio
-server has no URL to hand out, so it does not offer the tool. See
+good for one entity and one attachment type, and works once — but a refused
+file (wrong type, too big) does not use it up. The file is streamed on to
+HomeBox as it arrives, so the server's memory does not grow with its size. A
+stdio server has no URL to hand out, so it does not offer the tool. See
 [docs/architecture.md](docs/architecture.md) for why this endpoint takes no
 bearer token.
+
+| setting (flag / env / chart value) | default | |
+|---|---|---|
+| `--upload-max-bytes` / `UPLOAD_MAX_BYTES` / `upload.maxBytes` | 10 MiB | largest file a link accepts, up to 1 GiB. HomeBox has its own limit, `HBOX_WEB_MAX_UPLOAD_SIZE` (MiB, default 10): raise both together, or the refusal just moves |
+| `--upload-ttl` / `UPLOAD_TTL` / `upload.ttl` | 10m | how long a link stays valid, 1m to 24h |
+| `--upload-timeout` / `UPLOAD_TIMEOUT` / `upload.timeout` | 15m | how long one whole upload may take, 10s to 6h |
+| `--homebox-timeout` / `HOMEBOX_TIMEOUT` / `homebox.timeout` | 30s | deadline for an ordinary request to HomeBox; a streamed upload is bound by the upload timeout instead |
+
+Durations are Go durations (`90s`, `15m`, `1h`). A value out of range stops the
+server at startup, and the chart's schema refuses it at render time, rather
+than the setting quietly doing something else.
 
 `/v1/entities` returns items only — locations are reachable through the tree.
 The tool descriptions say so, because a model picking a tool reads them: one

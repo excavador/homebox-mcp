@@ -165,9 +165,18 @@ the credential, and everything is done to make it worth little:
   upload fails, so sending the wrong file does not cost the caller the link.
   The record is in memory and per replica; with several replicas a link could
   be replayed once on each, inside its ten minutes, to the same entity.
-- **Checked like any other upload.** The bytes are sniffed, the declared type
-  is not trusted, the extension is forced to the sniffed type, and the same
-  concurrency cap applies.
+- **Checked like any other upload.** The type is sniffed from the first bytes,
+  the declared type is not trusted, the extension is forced to the sniffed
+  type, and the same concurrency cap applies. The size limit is enforced
+  while reading, not from the declared length, which a sender can omit or lie
+  about.
+- **Streamed, so memory is flat.** Only the first 512 bytes are held; the rest
+  goes through a pipe into the multipart request to HomeBox. Buffering a file
+  twice, as the 10 MiB tool paths do, would need 200 MiB for a 100 MiB upload
+  in a pod limited to 128 MiB. The whole upload has one deadline
+  (`UPLOAD_TIMEOUT`), set on the read side too, so a sender that trickles
+  bytes cannot hold a slot; the ordinary 30-second HomeBox timeout does not
+  apply to it, because it counts the body.
 
 The route is `PUT /mcp/upload/{token}`. Go's mux prefers it over the
 catch-all `/mcp/` that sits behind the token check, so it needs no gateway
