@@ -304,14 +304,36 @@ func (u *Uploader) addTool(s *mcp.Server) {
 	})
 }
 
-// Mount registers the upload endpoint on mux under prefix, which is the path
-// the server itself is served at ("/mcp"), not the external one: a gateway
-// that rewrites /homebox to /mcp sends the link here unchanged.
-//
-// The pattern is more specific than the "/mcp/" route that sits behind the
-// bearer-token check, so Go's mux sends a PUT here and everything else there.
+// Mount registers the upload endpoint on mux under prefix.
 func (u *Uploader) Mount(mux *http.ServeMux, prefix string) {
 	mux.Handle("PUT "+strings.TrimRight(prefix, "/")+"/upload/{token}", http.HandlerFunc(u.handle))
+}
+
+// Handler serves the upload endpoint and NOTHING else: it is the whole
+// handler of the upload listener, which has no bearer-token check in front of
+// it (the signed link is the credential), so it must not carry any other route.
+// Any other path is answered 404 by the mux itself, and any method but PUT on
+// a link 405.
+//
+// The endpoint lives at the path of BaseURL plus "/upload/{token}" -- exactly
+// the link a client is given -- so a gateway routes the link to this listener
+// without rewriting it. With a BaseURL that has no path, that is
+// "/upload/{token}".
+func (u *Uploader) Handler() http.Handler {
+	mux := http.NewServeMux()
+	u.Mount(mux, u.basePath())
+
+	return mux
+}
+
+// basePath is the path of BaseURL, no trailing slash ("" for a bare host).
+func (u *Uploader) basePath() string {
+	parsed, err := url.Parse(u.base)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimRight(parsed.Path, "/")
 }
 
 func (u *Uploader) handle(w http.ResponseWriter, r *http.Request) {

@@ -9,12 +9,18 @@ request to HomeBox, and the process can be restarted or scaled at will.
     Claude Code (or any MCP client)
       │  presents client_id = an HTTPS URL to its own Client ID Metadata
       │  Document (CIMD) -- no pre-registration, no DCR
-      │  gets back an access token: iss=access-roster, aud=this resource
+      │  gets back an access token: iss=the issuer, aud=this resource
       │  MCP over streamable HTTP, Authorization: Bearer <access token>
       ▼
-    homebox-mcp  (TRANSPORT=http, listening on :8080/mcp)
-      │  validates the token itself: signature against access-roster's
-      │  JWKS, iss, and aud == RESOURCE_URL (RFC 8707) -- by access-roster's identity/resource
+    gateway  (routes the resource's path; rewrites nothing)
+      ▼
+    proxy container  (sluis resource-proxy, :8080)
+      │  validates the token: signature against the issuer's JWKS, iss, and
+      │  aud == the resource URL (RFC 8707); serves the RFC 9728 metadata;
+      │  writes one audit line; strips the Authorization header; maps the
+      │  resource's path to /mcp
+      ▼
+    homebox-mcp  (TRANSPORT=http, MCP on 127.0.0.1:8081/mcp)
       │  Authorization: Bearer <HomeBox API key>
       ▼
     HomeBox  /api/v1/...
@@ -22,40 +28,58 @@ request to HomeBox, and the process can be restarted or scaled at will.
 Two different credentials, and conflating them is the mistake this design
 exists to prevent:
 
-- The **caller's** token is an access-roster access token identifying a
-  person, bound to this server's own resource URL as its audience.
-  `homebox-mcp` verifies it itself, in-process — see
-  [design/cimd-auth.md](design/cimd-auth.md) for why authentication moved
-  from a perimeter gateway into the binary.
+- The **caller's** token is an access token identifying a person, bound to this
+  server's own resource URL as its audience. The **proxy** verifies it, and
+  `homebox-mcp` never sees it -- see [design/cimd-auth.md](design/cimd-auth.md).
 - The **server's** token is a HomeBox API key, held in a Kubernetes Secret and
   read once at startup. HomeBox accepts nothing else — its OIDC support is a
   browser redirect flow that ends by *issuing* one of these keys.
 
-### The server validates its own bearer tokens
+### Where authentication lives
 
-`ISSUER_URL` and `RESOURCE_URL` are both required for the http transport --
-there is no gateway fallback. The server verifies a request's bearer token
-against access-roster's own JWKS, requires `aud` to equal `RESOURCE_URL`
-exactly (RFC 8707), and serves its own OAuth 2.0 Protected Resource Metadata
-at the RFC 9728 well-known path for `RESOURCE_URL`
-(`/.well-known/oauth-protected-resource` plus the resource's own path) so a
-compliant client can discover access-roster without being told out of band.
-All of this comes from the shared access-roster library
-`github.com/truvity/sluis/identity/resource`; if the issuer cannot be
-reached the server answers `503`, not `401`. See
-[design/cimd-auth.md](design/cimd-auth.md).
+Not in this binary. The HTTP transport holds no authentication code and does
+not import the issuer's library; the sluis `resource-proxy` sidecar in the same
+pod is the pod's only authenticated port. Everything about *who may call* --
+the issuer, the audience, the metadata, the audit line -- is the sidecar's
+configuration (`ISSUER_URL`, `RESOURCE_URL`, `SCOPE`), and who may reach the
+resource is the issuer's policy for that URL.
 
-Exposed with no `ISSUER_URL`/`RESOURCE_URL` set, the process refuses to
-start the http transport at all -- there is no way to accidentally run it
-unauthenticated.
+The server is built so that leaving the sidecar out cannot go unnoticed:
+
+- **The MCP endpoint is loopback only.** `--addr` defaults to `127.0.0.1:8081`
+  and the server **refuses to start** with any other address (`0.0.0.0`, an
+  empty host, a pod IP, a name other than `localhost`), unless
+  `--allow-non-loopback` / `ALLOW_NON_LOOPBACK=true` says the network around it
+  does the isolation. A stray `0.0.0.0` in a values file therefore cannot
+  publish the inventory. In a pod, loopback is reachable only by the other
+  containers of the pod: the sidecar.
+- **No port for it.** The chart declares no container port for the MCP
+  endpoint, and the Service lists only the proxy port and the upload port.
+- **A leftover auth setting is refused.** `ISSUER_URL`, `RESOURCE_URL` or
+  `SCOPE` set on the *server* means someone still believes it checks tokens;
+  it exits with a message saying where they belong now.
+- **The chart will not render** without `auth.issuerUrl`, `auth.resourceUrl`
+  (https, a path, no trailing slash) and a sidecar pinned by tag and digest.
+
+### Three listeners
+
+| listener | flag | default | serves | reached by |
+|---|---|---|---|---|
+| MCP | `--addr` | `127.0.0.1:8081` | `/mcp`, `/mcp/` | the sidecar, over loopback |
+| upload | `--upload-addr` | `127.0.0.1:8082` (the chart: the pod IP) | `PUT <path of PUBLIC_URL>/upload/{token}` and **nothing else** | the gateway, past the sidecar |
+| ops | `--ops-addr` | `:9090` | `GET /healthz` and nothing else | the kubelet |
+
+Each handler is the whole of its listener: a path that does not belong is a
+404, tested for each. `/healthz` is on the ops port so the Service can never
+expose it, and the metadata is the sidecar's.
 
 ### One shared identity, and what that costs
 
-Every caller access-roster admits is still one HomeBox API key as far as
+Every caller the issuer admits is still one HomeBox API key as far as
 HomeBox itself is concerned: the server makes every request with it, so
 HomeBox attributes every change to that key rather than to the person who
 asked for it. **HomeBox's audit trail cannot tell one user's deletion from
-another's** -- access-roster identifies *who may reach this server*, not who
+another's** -- the issuer identifies *who may reach this server*, not who
 HomeBox believes made a given change.
 
 That is accepted for a household whose users already share a HomeBox group
@@ -178,31 +202,50 @@ the credential, and everything is done to make it worth little:
   bytes cannot hold a slot; the ordinary 30-second HomeBox timeout does not
   apply to it, because it counts the body.
 
-The route is `PUT /mcp/upload/{token}`. Go's mux prefers it over the
-catch-all `/mcp/` that sits behind the token check, so it needs no gateway
-rule, and every other method and path still goes through the check. A test
-builds the same mux, because a pattern conflict panics at startup, not at
-build time. What a leaked link allows is one attachment on one entity within
-ten minutes; it reads nothing and deletes nothing.
+The link is `PUT <PUBLIC_URL>/upload/{token}` and is served by the **upload
+listener**, which is not behind the sidecar -- the sidecar would answer a
+request with no access token `401` -- and carries nothing but this endpoint.
+It serves the link at the path the client was given (the path of `PUBLIC_URL`,
+`/homebox/upload/{token}` for `https://mcp.example/homebox`), so the gateway
+sends `<path>/upload` to that listener unrewritten, with an explicit request
+timeout of its own, and everything else through the sidecar. The chart's
+HTTPRoute does this, and its NetworkPolicy admits the gateway on the upload
+port as well as the proxy port. What a leaked link allows is one attachment on
+one entity within ten minutes; it reads nothing and deletes nothing.
 
 ### The excluded endpoints are a safety boundary, not an oversight
 
 `/actions/*` (including `wipe-inventory`), authentication and API-key
 management, group membership, and bulk import/export have no tool. These are
 the calls whose damage a model cannot foresee and cannot undo. `/healthz`
-likewise does not call HomeBox: a readiness probe that fails when a
-dependency blips takes a pod out of service for something restarting cannot
-fix.
+likewise does not call HomeBox: a probe that fails when a dependency blips
+restarts or unreadies a pod for something restarting cannot fix. (The sidecar's
+own `/readyz`, which waits for the issuer's discovery document, is the pod's
+readiness.)
 
 ## Transports
 
 `stdio` is the default, so running the binary with no configuration behaves
 the way a local MCP client expects. `http` serves the streamable HTTP
-transport at `/mcp`, which is what runs in a cluster; the chart hardcodes it,
-because stdio in a pod with no attached client exits immediately.
+transport at `/mcp` on loopback, behind the sidecar; it is what runs in a
+cluster, and the chart hardcodes it, because stdio in a pod with no attached
+client exits immediately.
 
-The HTTP listener binds `0.0.0.0`, not loopback — in a container, binding to
-`127.0.0.1` means nothing can reach it, including the kubelet's probes.
+The MCP listener binds loopback, not `0.0.0.0`: it has no authentication of its
+own. The upload listener and the ops listener bind where the gateway and the
+kubelet can reach them, and serve one endpoint each. The MCP SDK answers `403`
+to a loopback-bound server when the `Host` header is not loopback; the sidecar
+sets `Host` to its upstream (`127.0.0.1:8081`), so point the sidecar at the
+loopback address, not a pod IP or a Service name.
+
+### Request size
+
+The sidecar refuses request bodies over `MAX_REQUEST_BYTES` (`413`; its default
+is 4 MiB). `homebox_create_attachment` takes `data_base64` for up to 10 MiB of
+file, about 13.4 MB on the wire, so the chart sets `proxy.maxRequestBytes` to
+16 MiB, with the sidecar's memory limit at 128Mi because it buffers a JSON body
+to read the method and tool. The upload link is not behind the sidecar and has
+its own limit (`UPLOAD_MAX_BYTES`, up to 1 GiB).
 
 ## Startup
 

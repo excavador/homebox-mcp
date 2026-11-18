@@ -247,34 +247,80 @@ func TestUploadEndpointIsPutOnly(t *testing.T) {
 	}
 }
 
-// main.go registers the upload route next to the catch-all "/mcp/" that sits
-// behind the bearer-token check. A pattern conflict panics at startup, not at
-// build time, and a route that loses to the catch-all would demand a token a
-// curl cannot present -- so build the same mux and send requests through it.
-func TestUploadRouteBeatsTheProtectedCatchAll(t *testing.T) {
-	f := newFixture(t, 0)
-
-	protected := 0
-	mux := http.NewServeMux()
-	f.up.Mount(mux, "/mcp")
-	mux.HandleFunc("/mcp", func(http.ResponseWriter, *http.Request) { protected++ })
-	mux.HandleFunc("/mcp/", func(http.ResponseWriter, *http.Request) { protected++ })
+// The upload listener has no bearer-token check in front of it, so its handler
+// must be the upload endpoint and nothing else: a second route here would be a
+// second unauthenticated door. It serves at the path of the link a client is
+// given, so the gateway needs no rewrite.
+func TestUploadHandlerServesOnlyTheLink(t *testing.T) {
+	f := newFixture(t, 0) // BaseURL https://mcp.example/homebox/
+	h := f.up.Handler()
+	tok := f.link(t, "photo", false)
 
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/mcp/upload/"+f.link(t, "photo", false), bytes.NewReader(testPNG)))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/homebox/upload/"+tok, bytes.NewReader(testPNG)))
 
-	if rec.Code != http.StatusCreated || protected != 0 {
-		t.Errorf("PUT: status = %d, protected route hit %d times; the link must not need a bearer token", rec.Code, protected)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT to the link = %d: %s", rec.Code, rec.Body)
 	}
 
 	for _, p := range []struct{ method, path string }{
-		{http.MethodPost, "/mcp"}, {http.MethodPost, "/mcp/"}, {http.MethodGet, "/mcp/upload/x"}, {http.MethodPost, "/mcp/upload/x"},
+		{http.MethodPost, "/mcp"}, {http.MethodPost, "/mcp/"}, {http.MethodGet, "/mcp/upload/" + tok},
+		{http.MethodPut, "/mcp/upload/" + tok}, // the old in-process path
+		{http.MethodGet, "/healthz"}, {http.MethodGet, "/"}, {http.MethodGet, "/.well-known/oauth-protected-resource"},
+		{http.MethodGet, "/homebox"}, {http.MethodPost, "/homebox/mcp"}, {http.MethodPut, "/upload/" + tok},
+		{http.MethodGet, "/homebox/upload/"}, {http.MethodPut, "/homebox/upload/" + tok + "/extra"},
 	} {
-		mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(p.method, p.path, nil))
+		got := httptest.NewRecorder()
+		h.ServeHTTP(got, httptest.NewRequest(p.method, p.path, bytes.NewReader(testPNG)))
+
+		if got.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404: the upload listener serves nothing but the link", p.method, p.path, got.Code)
+		}
 	}
 
-	if protected != 4 {
-		t.Errorf("protected route hit %d times, want 4: everything but a PUT to an upload link goes behind the token check", protected)
+	// A method other than PUT on the link itself is refused, never run.
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
+		got := httptest.NewRecorder()
+		h.ServeHTTP(got, httptest.NewRequest(m, "/homebox/upload/"+tok, nil))
+
+		if got.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s on the link = %d, want 405", m, got.Code)
+		}
+	}
+}
+
+func TestUploadHandlerPathFollowsTheBaseURL(t *testing.T) {
+	c := homebox.New("http://unused", "t")
+
+	for _, tc := range []struct{ base, path string }{
+		{"https://mcp.example/homebox", "/homebox/upload/"},
+		{"https://mcp.example/a/b/", "/a/b/upload/"},
+		{"https://mcp.example", "/upload/"},
+	} {
+		up, err := NewUploader(c, UploadConfig{BaseURL: tc.base, Key: []byte("0123456789abcdef0123456789abcdef")})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		tok, err := up.mint(claims{Entity: "e1", Kind: "photo", Exp: time.Now().Add(time.Minute).Unix(), Max: up.max})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The route exists iff the link a client is given maps onto it: a
+		// request that gets past the mux reaches the (failing, no HomeBox
+		// here) handler and is not a 404.
+		rec := httptest.NewRecorder()
+		up.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, tc.path+tok, bytes.NewReader(testPNG)))
+
+		if rec.Code == http.StatusNotFound {
+			t.Errorf("base %q: PUT %s was not routed", tc.base, tc.path)
+		}
+
+		link := up.base + "/upload/" + tok
+		if !strings.HasSuffix(link, tc.path+tok) {
+			t.Errorf("base %q: link %q does not end in %s", tc.base, link, tc.path+tok)
+		}
 	}
 }
 

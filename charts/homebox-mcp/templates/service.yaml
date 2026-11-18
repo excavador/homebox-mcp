@@ -5,9 +5,15 @@ metadata:
   labels: {{- include "homebox-mcp.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
+  selector: {{- include "homebox-mcp.selectorLabels" . | nindent 4 }}
+  # The proxy's port and the upload port, and nothing else: the server's MCP
+  # endpoint is on loopback and its ops port is for the kubelet.
   ports:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
       protocol: TCP
-  selector: {{- include "homebox-mcp.selectorLabels" . | nindent 4 }}
+    - name: upload
+      port: {{ .Values.service.uploadPort }}
+      targetPort: upload
+      protocol: TCP

@@ -20,27 +20,74 @@ homebox:
   timeout: 30s
 
 # stdio is meaningless in a pod, so this chart only ever runs http.
+#
+# The pod has two containers:
+#
+#   homebox-mcp  the server. It holds NO authentication code. Its MCP endpoint
+#                is on 127.0.0.1:8081 (no container port, refused by the
+#                server on any other address), its ops port 9090 serves
+#                /healthz to the kubelet only, and its upload listener (8082,
+#                the pod's own IP) serves the signed upload link and nothing
+#                else.
+#   proxy        the sluis resource-proxy: the pod's only authenticated port
+#                (8080). It validates the caller's access token, serves the
+#                RFC 9728 protected-resource metadata, writes one audit line
+#                per request, strips the caller's Authorization header and
+#                forwards to the server on loopback.
+#
+# The Service exposes the proxy port and the upload port, and nothing else.
 service:
   type: ClusterIP
+  # The Service port that reaches the proxy (the container's is 8080).
   port: 8080
+  # The Service port that reaches the upload listener (the container's is
+  # 8082). The signed upload link goes here, past the proxy, because a curl
+  # in a shell has no access token: the link itself is the credential.
+  uploadPort: 8082
 
-# The server validates every request itself against access-roster: no
-# secret to provide here, because a bearer token is never a literal and a
-# CIMD client never registers one. Both are required -- there is no
-# gateway fallback any more.
+# The access-token issuer and this server's identity, as the PROXY sees them.
+# Both are required. Who may call is the issuer's policy for resourceUrl, not
+# anything here or in the server.
 auth:
-  # access-roster's own URL, exactly as it appears in a token's `iss`.
+  # The issuer's own URL, exactly as it appears in a token's `iss`. https.
   issuerUrl: ""
-  # This server's own EXTERNAL URL (not its in-cluster Service address):
-  # the RFC 8707 resource indicator a client names, and the audience
-  # access-roster mints a token for. Must match, byte for byte, this
-  # resource's id in access-roster's own policy.
+  # This server's own EXTERNAL URL (not its in-cluster Service address): the
+  # RFC 8707 resource indicator a client names, and the `aud` the proxy requires
+  # of every token. It must equal, byte for byte, this resource's id in the
+  # issuer's policy and the URL clients are given. https, a path, no trailing
+  # slash, no query or fragment. The path (say /homebox) is where the gateway
+  # routes the server; the proxy maps it to the server's /mcp. It is also the
+  # base of the upload links, which the server serves at <path>/upload/<token>.
   resourceUrl: ""
-  # Advertised in the PRM's scopes_supported and the 401 challenge's
-  # scope -- never checked by this server itself. access-roster refuses
-  # an authorize request with no scope at all; "openid" is the one it
-  # accepts by default. An estate needing more sets this, not the image.
+  # Advertised in the PRM's scopes_supported and the 401 challenge's scope --
+  # never checked. Some issuers refuse an authorize request with no scope at
+  # all; "openid" is the one most accept. Empty omits both.
   scope: openid
+
+# The resource-proxy sidecar (github.com/truvity/sluis, cmd/resource-proxy).
+# It is built by another repository's release, so there is NO default version:
+# pin the release you have verified by tag AND digest. Both are REQUIRED, so a
+# moved tag cannot change what guards the server.
+proxy:
+  image:
+    repository: ghcr.io/truvity/sluis/resource-proxy
+    # e.g. 1.84.0 -- no leading "v".
+    tag: ""
+    # sha256:<64 hex>, the image INDEX digest.
+    digest: ""
+    pullPolicy: IfNotPresent
+  # The numeric uid the image runs as. `runAsNonRoot` cannot verify a named
+  # user, so the uid is stated.
+  runAsUser: 65532
+  # Largest request body the proxy accepts (413 beyond it). The proxy's own
+  # default is 4 MiB; homebox_create_attachment takes data_base64 up to 10 MiB
+  # of file, which is about 13.4 MB once encoded, so this chart defaults to
+  # 16 MiB. The proxy buffers a JSON body to read the method and tool, so keep
+  # proxy.resources.limits.memory several times this.
+  maxRequestBytes: 16777216
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}
 
 # homebox_prepare_attachment_upload: one-time links a caller PUTs a local file
 # to. The file is streamed to HomeBox, so memory does not grow with its size.
@@ -55,6 +102,8 @@ upload:
   # A hundred megabytes over a slow uplink takes minutes.
   timeout: 15m
 
+# The server's own resources. Upload links stream, so memory does not grow with
+# a file; data_base64 attachments are held (10 MiB, a few times over).
 resources:
   requests: {cpu: 20m, memory: 64Mi}
   limits: {memory: 128Mi}
@@ -80,3 +129,64 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
+
+# The pod admits ingress on the proxy port and the upload port from
+# `ingressFrom` (the gateway that fronts the server; REQUIRED while enabled,
+# an empty list would admit nobody). The ops port is admitted from nobody (the
+# kubelet's probes are not subject to it). Egress is DNS and what the pod
+# calls: HTTPS (the issuer's signing keys, and the public https URLs that
+# homebox_create_attachment fetches) and HomeBox. `extraEgress` adds rules,
+# verbatim.
+#
+# DNS and HTTPS egress are OPEN BY DEFAULT: port 53, and tcp 443 (and the port
+# of the issuer's URL), to any destination, because an issuer behind a CDN or a
+# cloud endpoint has no address a chart can know, and a user-supplied https URL
+# can be anywhere. Name the peers in egress.dns and egress.https to close them.
+networkPolicy:
+  enabled: true
+  ingressFrom: []
+  egress:
+    # Optional peers for HTTPS. Empty: any destination.
+    https: []
+    # Optional peers for DNS (UDP and TCP 53). Empty: any destination, which
+    # works on every cluster; narrow it only to where YOUR resolver is.
+    dns: []
+    homebox:
+      # Peers HomeBox is reached at. Empty: any destination, on `ports`.
+      to: []
+      # Defaults to the port of homebox.url (80 or 443 from the scheme).
+      # NOTE: a policy applies to the POD's port, and a CNI that matches after
+      # the Service's translation (Cilium does) needs HomeBox's container
+      # port, not its Service's: set it here when the two differ.
+      ports: []
+  extraEgress: []
+
+# Optional: ONE gateway.networking.k8s.io/v1 HTTPRoute, in the release
+# namespace, shipped with the Service on purpose (a route whose backend
+# arrives later reads BackendNotFound). Rules, from the path of
+# auth.resourceUrl (say /homebox):
+#   PathPrefix <path>/upload                   -> the Service's upload port,
+#                                                 straight to the upload
+#                                                 listener, past the proxy,
+#                                                 with a request timeout of
+#                                                 upload.timeout
+#   PathPrefix <path>                          -> the proxy port, no filter
+#   PathPrefix /.well-known/oauth-protected-resource<path>
+#   Exact /.well-known/oauth-protected-resource -> the proxy port, no filter
+#   Exact <path>/.well-known/oauth-protected-resource
+#                                              -> the proxy port, the path
+#                                                 rewritten to the RFC 9728 one
+# The MCP rules carry NO timeout: MCP may hold a response open as a stream.
+# The longer prefix wins, so the upload rule takes <path>/upload.
+httpRoute:
+  enabled: false
+  # Optional: the route's name; defaults to the fullname.
+  name: ""
+  # Required while enabled. Passed through as written: group, kind, name,
+  # namespace, sectionName (port too). Example:
+  #   - {group: gateway.networking.k8s.io, kind: Gateway, name: mcp, namespace: gateway, sectionName: https}
+  parentRefs: []
+  # Optional. When set, the host of auth.resourceUrl must be one of these.
+  hostnames: []
+  annotations: {}
+  labels: {}
