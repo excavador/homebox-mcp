@@ -18,8 +18,19 @@ spec:
       annotations: {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      # Never the ServiceAccount token: nothing in this pod talks to the
+      # Kubernetes API, and the proxy, which checks the callers' tokens, has no
+      # use for a token that speaks for the pod.
+      automountServiceAccountToken: false
+      # Pod Security Standard "restricted": non-root, a seccomp profile, no
+      # privilege escalation and no capabilities on every container.
       securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
+        # The server. Loopback only for MCP: it declares no container port for
+        # it, and holds no authentication code (it refuses to bind a
+        # non-loopback MCP address). Its upload listener carries the signed
+        # upload link and nothing else; its ops port, /healthz, is for the
+        # kubelet.
         - name: homebox-mcp
           image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -44,29 +55,78 @@ spec:
             - name: TRANSPORT
               value: http
             - name: ADDR
-              value: "0.0.0.0:{{ .Values.service.port }}"
+              value: {{ include "homebox-mcp.mcpListen" . | quote }}
+            # The upload link is reached through the pod network, so the
+            # listener is on the pod's own IP (defined before it is used).
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: UPLOAD_ADDR
+              value: {{ printf "$(POD_IP):%s" (include "homebox-mcp.uploadPort" .) | quote }}
+            - name: OPS_ADDR
+              value: {{ printf ":%s" (include "homebox-mcp.opsPort" .) | quote }}
+            # The base of upload links, and the path they are served at.
+            - name: PUBLIC_URL
+              value: {{ .Values.auth.resourceUrl | quote }}
+          ports:
+            - name: upload
+              containerPort: {{ include "homebox-mcp.uploadPort" . }}
+              protocol: TCP
+            - name: ops
+              containerPort: {{ include "homebox-mcp.opsPort" . }}
+              protocol: TCP
+          # /healthz is liveness only and does NOT call HomeBox: a probe that
+          # fails when a dependency blips would take the pod out of service
+          # for something it cannot fix by restarting.
+          livenessProbe:
+            httpGet: {path: /healthz, port: ops}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /healthz, port: ops}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+        # The resource-proxy: the pod's only authenticated port. It checks the
+        # bearer token, serves the protected-resource metadata, writes the
+        # audit line and forwards to the server on loopback. No OUTBOUND_*:
+        # HomeBox takes only its own API key, so nothing is exchanged.
+        - name: proxy
+          image: {{ include "homebox-mcp.proxyImage" . | quote }}
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
+          securityContext:
+            runAsUser: {{ .Values.proxy.runAsUser }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: LISTEN
+              value: {{ printf ":%s" (include "homebox-mcp.proxyPort" .) | quote }}
+            - name: UPSTREAM
+              value: {{ printf "http://%s/mcp" (include "homebox-mcp.mcpListen" .) | quote }}
             - name: ISSUER_URL
               value: {{ .Values.auth.issuerUrl | quote }}
             - name: RESOURCE_URL
               value: {{ .Values.auth.resourceUrl | quote }}
             - name: SCOPE
               value: {{ .Values.auth.scope | quote }}
+            # data_base64 attachments reach 10 MiB of file, about 13.4 MB on
+            # the wire: above the proxy's own 4 MiB default.
+            - name: MAX_REQUEST_BYTES
+              value: {{ printf "%d" (int64 .Values.proxy.maxRequestBytes) | quote }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: {{ include "homebox-mcp.proxyPort" . }}
               protocol: TCP
-          # /healthz is liveness only and does NOT call HomeBox: a readiness
-          # probe that fails when a dependency blips would take the pod out
-          # of service for something it cannot fix by restarting.
           livenessProbe:
             httpGet: {path: /healthz, port: http}
-            initialDelaySeconds: 5
-            periodSeconds: 20
+          # /readyz waits for the issuer's discovery document: an issuer
+          # outage takes the pod out of service rather than serve refusals.
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
-            initialDelaySeconds: 3
-            periodSeconds: 10
-          resources: {{- toYaml .Values.resources | nindent 12 }}
+            httpGet: {path: /readyz, port: http}
+          resources: {{- toYaml .Values.proxy.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}

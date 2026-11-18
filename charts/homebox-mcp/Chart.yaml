@@ -2,8 +2,8 @@ apiVersion: v2
 name: homebox-mcp
 description: Model Context Protocol server for a HomeBox inventory
 type: application
-version: 0.5.2
-appVersion: "0.5.2"
+version: 0.9.0
+appVersion: "0.9.0"
 home: https://github.com/excavador/homebox-mcp
 sources:
   - https://github.com/excavador/homebox-mcp

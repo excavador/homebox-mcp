@@ -28,11 +28,13 @@ check stayed green.
 ## Running it against a real HomeBox
 
     just run https://homebox.example.com hb_...              # stdio
-    just serve https://homebox.example.com hb_... 127.0.0.1:8080   # http
+    just serve https://homebox.example.com hb_... https://mcp.example/homebox   # http
 
-`serve` binds loopback by default here, unlike the production default — this
-server authenticates nothing, so a development instance should not be on a
-network interface.
+`serve` binds the MCP endpoint to loopback, which is also the only address the
+server accepts for it: it authenticates nothing itself (the resource-proxy
+sidecar does, in a cluster), so a development instance must not be on a
+network interface. The upload link and `/healthz` listen on `127.0.0.1:8082`
+and `:9090`.
 
 ## Testing
 
@@ -69,6 +71,15 @@ it fail. This is not ceremony — it has caught two things:
 - rendering with no `homebox.url`
 - a URL ending in `/api` (the server appends it, so this would double)
 - an unknown values key such as `replicaCounts`
+- no issuer, no resource URL, a plain-http or trailing-slash resource URL, or a
+  sidecar without a tag and a digest: the sidecar is what authenticates, so a
+  chart that renders without it is an open door
+- an enabled NetworkPolicy that admits nobody, and a route with no Gateway
+
+and asserts the wiring that keeps the listeners apart: the Service exposes the
+proxy and upload ports only, the upload rule goes to the upload port with an
+explicit timeout and no rewrite, no other rule has a timeout, and the policy
+never admits the ops or MCP port.
 
 A chart exercised only with correct values has not been tested. The schema
 and the guards exist to reject input, so the checks that matter are the ones

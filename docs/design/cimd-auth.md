@@ -1,5 +1,14 @@
 # Design: CIMD authentication
 
+> **Where this runs changed in 0.9.0.** The token check, the RFC 9728 metadata
+> and the 401 challenge described below are no longer in this binary: they are
+> done by the sluis `resource-proxy` sidecar in the same pod, which implements
+> the same contract (same library behind it), and the server listens on
+> loopback behind it. What follows is still the contract a client sees and the
+> policy shape the issuer needs -- `ISSUER_URL`, `RESOURCE_URL` and `SCOPE` are
+> now the sidecar's settings, and `--issuer-url`, `--resource-url` and `--scope`
+> no longer exist on the server. See [architecture](../architecture.md#where-authentication-lives).
+
 This server used to authenticate nothing and rely entirely on a gateway
 in front of it. It now validates a bearer token itself, against
 [access-roster](https://github.com/truvity/sluis) (v1.29.0+,

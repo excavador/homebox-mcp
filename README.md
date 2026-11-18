@@ -30,8 +30,8 @@ Full instructions, including the Helm chart, are in
 |---|---|
 | [Installation](docs/installation.md) | binary, container and Helm chart; every value and env var |
 | [Connecting a client](docs/clients.md) | Claude Code over stdio and HTTP; what to expect from the tools |
-| [Architecture](docs/architecture.md) | the request path, how the server authenticates callers, what is load-bearing |
-| [CIMD auth design](docs/design/cimd-auth.md) | why and how the server validates bearer tokens against access-roster |
+| [Architecture](docs/architecture.md) | the request path, the three listeners, where authentication lives, what is load-bearing |
+| [CIMD auth design](docs/design/cimd-auth.md) | how callers authenticate: the Client ID Metadata Document flow, and the sidecar that checks the token |
 | [Development](docs/development.md) | devbox, `just check`, testing, releasing, adding a tool |
 
 ## What it exposes
@@ -121,15 +121,21 @@ accept an OIDC token — HomeBox's OIDC support is a browser redirect flow that
 ends by *issuing* one of these keys. Data is scoped by **group**, not by
 user, so the key sees whatever its owner's group contains.
 
-**The HTTP transport validates every request itself.** A bearer token minted
-by [access-roster](https://github.com/truvity/sluis), checked against
-its JWKS with this server's own resource URL as the required audience (RFC
-8707). `ISSUER_URL` and `RESOURCE_URL` are both required — there is no way to
-start the http transport, or render the chart, without them, and no gateway
-fallback. A client identifies itself the way the MCP authorization spec
-recommends now that dynamic registration is deprecated there: a Client ID
-Metadata Document, an HTTPS URL access-roster's policy allows. See
-[architecture](docs/architecture.md#the-server-validates-its-own-bearer-tokens)
+**The HTTP transport has no authentication of its own.** In a cluster it runs
+behind the [sluis `resource-proxy`](https://github.com/truvity/sluis)
+sidecar, which verifies every caller's access token (signature against the
+issuer's keys, `iss`, and `aud` equal to the server's resource URL, RFC 8707),
+serves the RFC 9728 protected-resource metadata, writes an audit line per
+request and forwards to the server over loopback. The server's MCP endpoint
+listens on `127.0.0.1` and **refuses to bind anything else** unless told to
+(`--allow-non-loopback`), so a wrong address can never publish the inventory.
+The Helm chart ships both containers and will not render without the issuer,
+the resource URL and a pinned sidecar image. One endpoint is deliberately
+outside the sidecar: the signed upload link (`PUT <resource URL>/upload/<token>`),
+on a listener of its own that serves nothing else. A client identifies itself
+the way the MCP authorization spec recommends now that dynamic registration is
+deprecated there: a Client ID Metadata Document, an HTTPS URL the issuer's
+policy allows. See [architecture](docs/architecture.md#where-authentication-lives)
 and [the design doc](docs/design/cimd-auth.md).
 
 ## Why this exists rather than a fork

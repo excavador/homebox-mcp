@@ -1,0 +1,99 @@
+{{- if .Values.httpRoute.enabled }}
+{{- $r := .Values.httpRoute }}
+{{- $path := include "homebox-mcp.resourcePath" . }}
+{{- $svc := include "homebox-mcp.fullname" . }}
+{{- /*
+One HTTPRoute, shipped WITH the Service on purpose: a route whose backend
+arrives later reads BackendNotFound and degrades whatever owns it.
+
+The gateway rewrites nothing for the MCP rules: the proxy maps the resource
+path to the server's /mcp itself, and answers 404 for any path outside it.
+
+THE UPLOAD LINK bypasses the proxy. PUT <path>/upload/<token> carries no
+access token (a curl in a shell has none; the signed link is the credential),
+so the proxy would answer 401. Its rule sends the path straight to the upload
+listener, which serves that endpoint and nothing else, at the same path: the
+link reaches the handler as it was given, unrewritten. The longer prefix wins
+over <path>. The rule has an explicit request timeout, the upload's own.
+
+The MCP rules have NO request timeout: MCP's streamable HTTP may hold a
+response open as a stream, and a gateway's default would cut it. Nothing
+about them is bounded here.
+
+The two RFC 9728 forms: the proxy serves the metadata at the well-known path
+BEFORE the resource path, and at the bare well-known path. A client that
+appends the well-known segment to the resource instead
+(<path>/.well-known/oauth-protected-resource) is rewritten to the former,
+because under <path> the proxy would treat it as an MCP request and want a
+token.
+*/}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ default (include "homebox-mcp.fullname" .) $r.name }}
+  labels:
+    {{- include "homebox-mcp.labels" . | nindent 4 }}
+    {{- with $r.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $r.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs: {{- toYaml $r.parentRefs | nindent 4 }}
+  {{- with $r.hostnames }}
+  hostnames: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ $path }}/upload
+      timeouts:
+        request: {{ .Values.upload.timeout }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ $svc }}
+          port: {{ .Values.service.uploadPort }}
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ $path }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ $svc }}
+          port: {{ .Values.service.port }}
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /.well-known/oauth-protected-resource{{ $path }}
+        - path:
+            type: Exact
+            value: /.well-known/oauth-protected-resource
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ $svc }}
+          port: {{ .Values.service.port }}
+          weight: 1
+    - matches:
+        - path:
+            type: Exact
+            value: {{ $path }}/.well-known/oauth-protected-resource
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /.well-known/oauth-protected-resource{{ $path }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ $svc }}
+          port: {{ .Values.service.port }}
+          weight: 1
+{{- end }}

@@ -10,16 +10,20 @@
 //	stdio       the default, for running it locally next to a client
 //	http        streamable HTTP, for running it in a cluster
 //
-// The HTTP transport validates every request itself: a bearer token minted
-// by access-roster (github.com/truvity/sluis), checked against its
-// JWKS with this server's own resource URL as the required audience (RFC
-// 8707), and its own RFC 9728 Protected Resource Metadata document so a
-// client can discover that issuer without being told out of band. A client
-// identifies itself the way the Model Context Protocol's authorization
-// spec recommends now that dynamic registration is deprecated there: a
-// Client ID Metadata Document, an HTTPS URL access-roster's policy allows.
-// See docs/design/cimd-auth.md. Exposing this with no --issuer-url and
-// --resource-url set is exposing the whole inventory.
+// The HTTP transport holds NO authentication code. In a cluster it runs behind
+// the sluis resource-proxy sidecar (github.com/truvity/sluis, cmd/resource-proxy),
+// which checks every caller's access token, serves the RFC 9728 Protected
+// Resource Metadata, writes the audit line and forwards to this server over
+// loopback. So there are three listeners, each with one job:
+//
+//	--addr         the MCP endpoint, /mcp, loopback only (refused otherwise)
+//	--upload-addr  the signed upload link, PUT <path of --public-url>/upload/<token>,
+//	               and nothing else; reachable from the gateway, no bearer token
+//	--ops-addr     /healthz for the kubelet, and nothing else
+//
+// Exposing --addr beyond loopback is exposing the whole inventory with no
+// authentication, which is why a non-loopback address is refused unless
+// --allow-non-loopback says so. See docs/design/cimd-auth.md.
 package main
 
 import (
@@ -29,13 +33,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/truvity/sluis/identity/resource"
 	"github.com/urfave/cli/v3"
 
 	"github.com/excavador/homebox-mcp/internal/homebox"
@@ -84,34 +88,43 @@ func main() {
 			},
 			&cli.StringFlag{
 				Name: "addr",
-				// 0.0.0.0, not 127.0.0.1: in a pod, loopback means nothing
-				// can reach it, including the readiness probe.
-				Usage:   "listen address for the http transport",
-				Value:   "0.0.0.0:8080",
+				// Loopback, not 0.0.0.0: this listener has no authentication of its
+				// own. The resource-proxy sidecar in the same pod is what faces
+				// the network and forwards to it here.
+				Usage:   "listen address of the MCP endpoint, loopback only (http transport only)",
+				Value:   defaultMCPAddr,
 				Sources: cli.EnvVars("ADDR"),
 			},
-			&cli.StringFlag{
-				Name:    "issuer-url",
-				Usage:   "access-roster issuer that mints tokens for this resource (http transport only)",
-				Sources: cli.EnvVars("ISSUER_URL"),
+			&cli.BoolFlag{
+				Name: "allow-non-loopback",
+				// An escape hatch for a deployment whose network does the
+				// isolation (a pod IP that nothing but a trusted proxy reaches).
+				Usage:   "let --addr bind a non-loopback address: the MCP endpoint then has NO authentication (http transport only)",
+				Sources: cli.EnvVars("ALLOW_NON_LOOPBACK"),
 			},
 			&cli.StringFlag{
-				Name: "resource-url",
-				// The RFC 8707 resource indicator a client names and the
-				// audience access-roster mints for it -- this server's own
-				// externally-reachable URL, not its in-cluster address.
-				Usage:   "this server's own external URL (http transport only)",
-				Sources: cli.EnvVars("RESOURCE_URL"),
+				Name: "upload-addr",
+				// Reachable by the gateway, so not loopback in a pod: the chart
+				// sets the pod's own IP. It serves the upload link and nothing
+				// else.
+				Usage:   "listen address of the signed upload link, which is NOT behind the proxy (http transport only)",
+				Value:   defaultUploadAddr,
+				Sources: cli.EnvVars("UPLOAD_ADDR"),
 			},
 			&cli.StringFlag{
-				Name: "scope",
-				// access-roster rejects an authorize request that carries
-				// no scope at all. "openid" is the one it accepts out of
-				// the box; an estate that needs more sets this itself.
-				// Never checked here -- see resource.Config.Scope.
-				Usage:   "OAuth scope advertised in the PRM and the 401 challenge (http transport only)",
-				Value:   "openid",
-				Sources: cli.EnvVars("SCOPE"),
+				Name:    "ops-addr",
+				Usage:   "listen address of /healthz, for the kubelet; serves nothing else (http transport only)",
+				Value:   defaultOpsAddr,
+				Sources: cli.EnvVars("OPS_ADDR"),
+			},
+			&cli.StringFlag{
+				Name: "public-url",
+				// What a client uses to reach this server from outside -- the
+				// resource URL the sidecar checks tokens for. Here it only builds
+				// the upload links, and its path is where the upload listener
+				// serves them.
+				Usage:   "this server's own external URL, the base of upload links (http transport only)",
+				Sources: cli.EnvVars("PUBLIC_URL"),
 			},
 			&cli.Int64Flag{
 				Name: "upload-max-bytes",
@@ -147,6 +160,18 @@ func main() {
 func run(ctx context.Context, c *cli.Command) error {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
+	// Refuse an unsafe or incomplete http configuration before anything else:
+	// before HomeBox is contacted, and before any listener is bound.
+	var publicURL string
+
+	if c.String("transport") != "stdio" {
+		var err error
+
+		if publicURL, err = checkHTTPConfig(c, log); err != nil {
+			return err
+		}
+	}
+
 	client := homebox.New(c.String("homebox-url"), c.String("homebox-token"),
 		homebox.WithTimeout(c.Duration("homebox-timeout")))
 
@@ -165,21 +190,6 @@ func run(ctx context.Context, c *cli.Command) error {
 		return server.New(client, version).Run(ctx, &mcp.StdioTransport{})
 	}
 
-	issuerURL := c.String("issuer-url")
-	resourceURL := c.String("resource-url")
-	if issuerURL == "" || resourceURL == "" {
-		return fmt.Errorf("--issuer-url and --resource-url (or ISSUER_URL / RESOURCE_URL) are required for the http transport")
-	}
-
-	auth, err := resource.New(resource.Config{
-		IssuerURL:   issuerURL,
-		ResourceURL: resourceURL,
-		Scope:       c.String("scope"),
-	})
-	if err != nil {
-		return fmt.Errorf("auth: %w", err)
-	}
-
 	// Upload links are signed with a key derived from the HomeBox API key, so
 	// there is no second secret to provision or rotate. The key is derived,
 	// not the token itself: the signature must not be an oracle for it.
@@ -187,7 +197,7 @@ func run(ctx context.Context, c *cli.Command) error {
 	keyMAC.Write([]byte("homebox-mcp/upload-link/v1"))
 
 	uploads, err := server.NewUploader(client, server.UploadConfig{
-		BaseURL:  resourceURL,
+		BaseURL:  publicURL,
 		Key:      keyMAC.Sum(nil),
 		MaxBytes: c.Int64("upload-max-bytes"),
 		TTL:      c.Duration("upload-ttl"),
@@ -199,52 +209,81 @@ func run(ctx context.Context, c *cli.Command) error {
 
 	s := server.New(client, version, server.WithUploads(uploads))
 
-	handler := mcp.NewStreamableHTTPHandler(
+	mcpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return s }, nil)
 
-	mux := http.NewServeMux()
-	// The upload endpoint is reachable WITHOUT a bearer token on purpose: the
-	// caller is a curl in a shell, and the signed link is the credential. Its
-	// pattern is more specific than "/mcp/", so only a PUT to it comes here.
-	uploads.Mount(mux, "/mcp")
-	mux.Handle("/mcp", auth.Protect(handler))
-	mux.Handle("/mcp/", auth.Protect(handler))
-	// RFC 9728 puts the resource's own path after the well-known prefix. The
-	// bare prefix is kept as an alias for a gateway that rewrites a
-	// path-suffixed request to it (it is the same document).
-	mux.Handle(auth.Path(), auth.Metadata())
-	if auth.Path() != resource.MetadataPath {
-		mux.Handle(resource.MetadataPath, auth.Metadata())
+	listeners := []listener{
+		{name: "mcp", addr: c.String("addr"), handler: mcpMux(mcpHandler)},
+		// The signed upload link is reachable WITHOUT a bearer token on
+		// purpose: the caller is a curl in a shell, and the link is the
+		// credential. It has a listener of its own so the gateway can send it
+		// past the proxy, and so that this listener carries nothing else.
+		{name: "upload", addr: c.String("upload-addr"), handler: uploads.Handler()},
+		{name: "ops", addr: c.String("ops-addr"), handler: opsMux()},
 	}
 
-	// Liveness only. It deliberately does NOT call HomeBox: a probe that
-	// fails when a dependency is briefly unavailable restarts a process
-	// that would otherwise have recovered on its own. It is also, on
-	// purpose, unauthenticated -- a probe carries no bearer token.
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "ok")
-	})
+	return serve(ctx, log, listeners)
+}
 
-	srv := &http.Server{
-		Addr:              c.String("addr"),
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
+// checkHTTPConfig validates what the http transport must have before it starts
+// and returns the public URL.
+func checkHTTPConfig(c *cli.Command, log *slog.Logger) (string, error) {
+	publicURL, err := checkPublicURL(c.String("public-url"))
+	if err != nil {
+		return "", err
 	}
 
-	go func() {
-		<-ctx.Done()
+	if err := refuseLeftoverAuthSettings(os.LookupEnv); err != nil {
+		return "", err
+	}
 
-		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
+	// Fail closed: the MCP endpoint has no authentication, so it may only be
+	// bound where the sidecar alone can reach it.
+	mcpAddr := c.String("addr")
+	if c.Bool("allow-non-loopback") {
+		log.Warn("MCP endpoint may bind a non-loopback address: it has NO authentication", "addr", mcpAddr)
+	} else if err := requireLoopback(mcpAddr); err != nil {
+		return "", err
+	}
 
-		_ = srv.Shutdown(shutdown)
-	}()
+	return publicURL, nil
+}
 
-	log.Info("serving mcp over http", "addr", srv.Addr)
+// Default listen addresses. The chart overrides them only where it must.
+const (
+	defaultMCPAddr    = "127.0.0.1:8081"
+	defaultUploadAddr = "127.0.0.1:8082"
+	defaultOpsAddr    = ":9090"
+)
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
+// checkPublicURL requires an absolute http(s) URL, and returns it as given.
+func checkPublicURL(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("--public-url (or PUBLIC_URL) is required for the http transport: it is the base of upload links")
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+		return "", fmt.Errorf("--public-url %q must be an absolute http(s) URL", raw)
+	}
+
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("--public-url %q must have no query or fragment", raw)
+	}
+
+	return raw, nil
+}
+
+// refuseLeftoverAuthSettings stops a stale values file from leaving a false
+// impression. Authentication moved to the sidecar; an ISSUER_URL or
+// RESOURCE_URL still set on THIS container means someone believes this server
+// checks tokens. It does not, and it will not pretend to.
+func refuseLeftoverAuthSettings(lookup func(string) (string, bool)) error {
+	for _, name := range []string{"ISSUER_URL", "RESOURCE_URL", "SCOPE"} {
+		if v, ok := lookup(name); ok && v != "" {
+			return fmt.Errorf("%s is set, but this server no longer authenticates anything: the resource-proxy sidecar does. "+
+				"Move it to the sidecar's environment and, for the server's own external URL, set PUBLIC_URL", name)
+		}
 	}
 
 	return nil

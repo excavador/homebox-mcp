@@ -1,0 +1,62 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+The pod admits the gateway on the proxy port and the upload port and nothing
+else (not the ops port: the kubelet's probes are not subject to it), and
+reaches DNS, HTTPS (the issuer's signing keys; the public URLs
+homebox_create_attachment fetches) and HomeBox. extraEgress adds rules,
+verbatim.
+*/}}
+{{- $httpsPorts := uniq (list "443" (include "homebox-mcp.urlPort" .Values.auth.issuerUrl)) }}
+{{- $homeboxPorts := .Values.networkPolicy.egress.homebox.ports | default (list (include "homebox-mcp.urlPort" .Values.homebox.url)) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "homebox-mcp.fullname" . }}
+  labels: {{- include "homebox-mcp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "homebox-mcp.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The gateway: the proxy's port (everything but the upload link) and the
+    # upload listener's.
+    - from: {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
+      ports:
+        - port: {{ include "homebox-mcp.proxyPort" . }}
+          protocol: TCP
+        - port: {{ include "homebox-mcp.uploadPort" . }}
+          protocol: TCP
+  egress:
+    # DNS. With no `networkPolicy.egress.dns` peers this is port 53 to ANY
+    # destination: the cluster resolver is not a kube-system pod on every
+    # cluster, and a rule naming one namespace blocks DNS where it is not.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      {{- with .Values.networkPolicy.egress.dns }}
+      to: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # HTTPS: the issuer (signing keys) and the public URLs the server fetches.
+    - ports:
+        {{- range $p := $httpsPorts }}
+        - port: {{ $p }}
+          protocol: TCP
+        {{- end }}
+      {{- with .Values.networkPolicy.egress.https }}
+      to: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # HomeBox, the server's one upstream.
+    - ports:
+        {{- range $p := $homeboxPorts }}
+        - port: {{ $p }}
+          protocol: TCP
+        {{- end }}
+      {{- with .Values.networkPolicy.egress.homebox.to }}
+      to: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
